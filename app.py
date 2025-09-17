@@ -16,6 +16,7 @@ from dash import Dash, html, dcc, dash_table, Input, Output, State
 from dash.dash_table import FormatTemplate
 from dash.dash_table.Format import Format, Scheme
 import dash  # (NEW) 인터랙션 로그용
+import os
 
 # (파일 상단 import 근처에 추가)
 import io
@@ -34,11 +35,286 @@ def _flow_scale(seg, mod, loy):
     h = int(hashlib.sha256(key.encode("utf-8")).hexdigest()[:8], 16)
     return 7.5 + (h % 1100) / 100.0
 
+
 from dash import Dash, html, dcc  # 기존 import 유지
 import os
 
 app = Dash(__name__)
 server = app.server   # 🔴 추가: Gunicorn이 이 server를 사용함
+
+# ====== app.py (상단) ======
+import os
+from dash import Dash, html, dcc, dash_table
+from dash.dash_table import FormatTemplate
+from dash.dash_table.Format import Format, Scheme
+
+# --- 기본 상수/포맷 (레이아웃이 참조하는 값들) ---
+DEFAULT_PATH = os.getenv(
+    "DEFAULT_EXCEL_PATH",
+    "assets/bayesian_analysis_total_v1.xlsx"  # 리포 경로 기준 상대경로
+)
+
+GRAPH_CONFIG = {
+    "displaylogo": False,
+    "toImageButtonOptions": {"format": "png", "filename": "bayesian_dashboard"},
+    "modeBarButtonsToRemove": [
+        "select2d", "lasso2d", "autoScale2d", "toggleSpikelines"
+    ],
+}
+
+CARD_STYLE = {
+    "background": "white",
+    "border": "1px solid #eee",
+    "borderRadius": "10px",
+    "padding": "12px",
+    "boxShadow": "0 2px 8px rgba(0,0,0,0.04)"
+}
+
+KPI_CARD_STYLE = {
+    **CARD_STYLE,
+    "display": "flex",
+    "flexDirection": "column",
+    "justifyContent": "space-between",
+    "minHeight": "70px",
+}
+
+percent1 = FormatTemplate.percentage(1)             # 0.0%
+num1 = Format(precision=1, scheme=Scheme.fixed)     # 0.0
+
+# --- Dash 앱/서버 ---
+app = Dash(__name__, suppress_callback_exceptions=True)
+server = app.server  # render/gunicorn 엔트리
+
+# --- 레이아웃 함수 (첫 요청 시 생성; 부팅 안정적) ---
+def serve_layout():
+    return html.Div(
+        [
+            dcc.Store(id="store-master"),
+            dcc.Store(id="store-tm"),
+            dcc.Store(id="store-sankey"),
+            dcc.Store(id="store-overall"),
+            dcc.Store(id="store-mod-opts"),
+
+            # Sankey 드래그 토글 + 인터랙션 로그
+            html.Div(
+                [
+                    dcc.Checklist(
+                        id="sankey-drag",
+                        options=[{"label": " Sankey 드래그 허용", "value": "drag"}],
+                        value=[],
+                        inputStyle={"marginRight": "6px"},
+                        style={"fontSize": "12px", "color": "#555"},
+                    ),
+                    html.Div(id="interact-msg",
+                             style={"marginTop":"6px","fontSize":"12px","color":"#444"}),
+                ],
+                style={"display":"flex","justifyContent":"space-between",
+                       "alignItems":"center","padding":"0 16px 8px"},
+            ),
+
+            # 상단 바
+            html.Div(
+                [
+                    html.Div("Bayesian Journey Dashboard",
+                             style={"fontWeight":"700","fontSize":"18px"}),
+                    html.Div(
+                        [
+                            dcc.Input(
+                                id="excel-path", value=DEFAULT_PATH,
+                                placeholder="Excel 경로",
+                                style={"width":"520px","marginRight":"8px"}
+                            ),
+                            html.Button("Load", id="load-btn", n_clicks=0,
+                                        className="btn", style={"marginRight":"8px"}),
+                        ],
+                        style={"display":"flex","alignItems":"center"},
+                    ),
+                ],
+                style={"display":"flex","justifyContent":"space-between",
+                       "alignItems":"center","padding":"12px 16px",
+                       "borderBottom":"1px solid #eee","position":"sticky",
+                       "top":"0","background":"#fafafa","zIndex":10},
+            ),
+
+            html.Div(id="status-msg",
+                     style={"padding":"8px 16px","color":"#555","fontSize":"12px"}),
+
+            # 필터
+            html.Div(
+                [
+                    html.Div([html.Label("Segment", style={"fontWeight":"600"}),
+                              dcc.Dropdown(id="dd-seg", options=[], value="ALL", clearable=True)],
+                             style={"flex":"1","minWidth":"220px","marginRight":"8px"}),
+                    html.Div([html.Label("Model", style={"fontWeight":"600"}),
+                              dcc.Dropdown(id="dd-mod", options=[], value="ALL", clearable=True)],
+                             style={"flex":"1","minWidth":"220px","marginRight":"8px"}),
+                    html.Div([html.Label("Loyalty", style={"fontWeight":"600"}),
+                              dcc.Dropdown(id="dd-loy", options=[], value="ALL", clearable=True)],
+                             style={"flex":"1","minWidth":"220px"}),
+                ],
+                style={"display":"flex","gap":"8px","padding":"12px 16px"},
+            ),
+
+            # KPI
+            html.Div(
+                [
+                    html.Div([html.Div("표본 수", style={"color":"#888","fontSize":"12px"}),
+                              html.H3(id="kpi-sample", style={"margin":"4px 0 0"})],
+                             style=KPI_CARD_STYLE),
+                    html.Div([html.Div("최종 구매율 (Δ 포함)", style={"color":"#888","fontSize":"12px"}),
+                              html.H3(id="ins-final", style={"margin":"4px 0 0"})],
+                             style=KPI_CARD_STYLE),
+                    html.Div([html.Div("최대 드롭", style={"color":"#888","fontSize":"12px"}),
+                              html.H3(id="ins-drop", style={"margin":"4px 0 0","fontSize":"18px"})],
+                             style=KPI_CARD_STYLE),
+                    html.Div([html.Div("불확실성 (95% HDI 폭)", style={"color":"#888","fontSize":"12px"}),
+                              html.H3(id="ins-uncert", style={"margin":"4px 0 0"})],
+                             style=KPI_CARD_STYLE),
+                ],
+                style={"display":"grid","gridTemplateColumns":"repeat(4,1fr)",
+                       "gap":"12px","padding":"0 16px 12px"},
+            ),
+
+            # 숨김 KPI(호환)
+            html.Div([html.H3(id="kpi-buy-success"), html.H3(id="kpi-buy-fail")],
+                     style={"display":"none"}),
+
+            # Row 1: Sankey + 전이 퍼널 + (워터폴/PPC 탭)
+            html.Div(
+                [
+                    html.Div(dcc.Graph(id="fig-sankey", config=GRAPH_CONFIG,
+                                       style={"height":"400px"}),
+                             style={**CARD_STYLE, "height":"440px"}),
+
+                    html.Div(dcc.Graph(id="fig-matrix", config=GRAPH_CONFIG,
+                                       style={"height":"400px"}),
+                             style={**CARD_STYLE, "height":"440px"}),
+
+                    html.Div(
+                        [
+                            dcc.Tabs(
+                                id="tab-right", value="waterfall",
+                                children=[
+                                    dcc.Tab(label="워터폴", value="waterfall"),
+                                    dcc.Tab(label="PPC(구매율)", value="ppc"),
+                                ],
+                                style={"marginBottom":"6px"},
+                            ),
+                            dcc.Graph(id="fig-right", config=GRAPH_CONFIG,
+                                      style={"height":"400px"}),
+                        ],
+                        style={**CARD_STYLE, "height":"440px"},
+                    ),
+                ],
+                style={
+                    "display":"grid",
+                    "gridTemplateColumns":"1.3fr 1fr 1.5fr",
+                    "gap":"18px",
+                    "padding":"30px 30px 30px", "marginBottom":"36px"
+                },
+            ),
+
+            # Row 2: 스테이지 리프트 + 포레스트 + 버블
+            html.Div(
+                [
+                    html.Div(
+                        [
+                            html.Div(
+                                [
+                                    html.Span("Stage",
+                                              style={"fontSize":"12px","color":"#666","marginRight":"8px"}),
+                                    dcc.Dropdown(
+                                        id="dd-stage-rank",
+                                        options=[{"label": v, "value": v}
+                                                 for v in ["선호","추천","구매의향","구매"]],
+                                        value="구매", clearable=False,
+                                        style={"width":"140px","fontSize":"12px"},
+                                    ),
+                                ],
+                                style={"display":"flex","justifyContent":"flex-end",
+                                       "alignItems":"center","marginBottom":"6px"},
+                            ),
+                            dcc.Graph(id="fig-stage-rank", config=GRAPH_CONFIG,
+                                      style={"height":"380px"}),
+                        ],
+                        style={**CARD_STYLE, "height":"420px","overflow":"hidden"},
+                    ),
+
+                    html.Div(dcc.Graph(id="fig-forest", config=GRAPH_CONFIG,
+                                       style={"height":"380px"}),
+                             style={**CARD_STYLE, "height":"420px","overflow":"hidden"}),
+
+                    html.Div(dcc.Graph(id="fig-bubble", config=GRAPH_CONFIG,
+                                       style={"height":"380px"}),
+                             style={**CARD_STYLE, "height":"420px","overflow":"hidden"}),
+                ],
+                style={"display":"grid","gridTemplateColumns":"1fr 1fr 1fr",
+                       "gap":"18px","padding":"30px 30px 30px", "marginTop":"36px"},
+            ),
+
+            # 숨김 그래프
+            html.Div(
+                [
+                    dcc.Graph(id="fig-survival", config=GRAPH_CONFIG),
+                    dcc.Graph(id="fig-funnel",   config=GRAPH_CONFIG),
+                ],
+                style={"display":"none"},
+            ),
+
+            # 상세 테이블
+            html.Div(
+                [
+                    html.H4("상세 메트릭", style={"margin":"0 0 8px 0"}),
+                    dash_table.DataTable(
+                        id="metrics-table",
+                        columns=[
+                            {"name": "단계",        "id": "단계"},
+                            {"name": "베이스수",    "id": "베이스수", "type": "numeric",
+                             "format": Format(precision=0, scheme=Scheme.fixed)},
+                            {"name": "성공확률",    "id": "성공확률", "type": "numeric", "format": percent1},
+                            {"name": "실패확률",    "id": "실패확률", "type": "numeric", "format": percent1},
+                            {"name": "하한",        "id": "하한",     "type": "numeric", "format": percent1},
+                            {"name": "상한",        "id": "상한",     "type": "numeric", "format": percent1},
+                            {"name": "판정",        "id": "판정"},
+                            {"name": "평가등급",    "id": "평가등급"},
+                            {"name": "SNR",         "id": "SNR",      "type": "numeric", "format": num1},
+                            {"name": "Lift",        "id": "Lift",     "type": "numeric", "format": num1},
+                            {"name": "raw평균",     "id": "raw평균",  "type": "numeric", "format": percent1},
+                            {"name": "raw표준편차", "id": "raw표준편차","type": "numeric", "format": percent1},
+                        ],
+                        data=[],
+                        page_size=10,
+                        style_table={"overflowX":"auto"},
+                        style_cell={"fontFamily":"Noto Sans KR, Arial, sans-serif",
+                                    "fontSize":"12px","padding":"6px"},
+                        style_header={"fontWeight":"bold"},
+                        style_data_conditional=[
+                            {"if": {"column_id": "베이스수"},     "textAlign": "right"},
+                            {"if": {"column_id": "성공확률"},     "textAlign": "right"},
+                            {"if": {"column_id": "실패확률"},     "textAlign": "right"},
+                            {"if": {"column_id": "하한"},         "textAlign": "right"},
+                            {"if": {"column_id": "상한"},         "textAlign": "right"},
+                            {"if": {"column_id": "SNR"},          "textAlign": "right"},
+                            {"if": {"column_id": "Lift"},         "textAlign": "right"},
+                            {"if": {"column_id": "raw평균"},      "textAlign": "right"},
+                            {"if": {"column_id": "raw표준편차"},  "textAlign": "right"},
+                            {"if": {"row_index": "odd"}, "backgroundColor": "#fafafa"},
+                        ],
+                    ),
+                ],
+                style={**CARD_STYLE, "margin":"18px 16px 24px"},
+            ),
+        ],
+        style={"background":"#f6f7fb","minHeight":"100vh"},
+    )
+
+# 레이아웃 지정
+app.layout = serve_layout
+
+# ====== (여기 아래에) 콜백/데이터 로딩/그래프 생성 함수들 이어서 작성 ======
+
+
+
 
 # ======== 인터랙션 공용 설정 ========
 GRAPH_CONFIG = {
@@ -2222,208 +2498,6 @@ KPI_CARD_STYLE = {
 
 ROW2_CARD_H  = 360
 ROW2_GRAPH_H = 320
-
-# ───────────────── app.layout 교체 ─────────────────
-app.layout = html.Div(
-    [
-        dcc.Store(id="store-master"),
-        dcc.Store(id="store-tm"),
-        dcc.Store(id="store-sankey"),
-        dcc.Store(id="store-overall"),
-        dcc.Store(id="store-mod-opts"),
-
-        # Sankey 드래그 토글 + 인터랙션 로그
-        html.Div(
-            [
-                dcc.Checklist(
-                    id="sankey-drag",
-                    options=[{"label": " Sankey 드래그 허용", "value": "drag"}],
-                    value=[],
-                    inputStyle={"marginRight": "6px"},
-                    style={"fontSize": "12px", "color": "#555"},
-                ),
-                html.Div(id="interact-msg", style={"marginTop": "6px","fontSize": "12px","color": "#444"}),
-            ],
-            style={"display":"flex","justifyContent":"space-between","alignItems":"center","padding":"0 16px 8px"},
-        ),
-
-        # 상단 바
-        html.Div(
-            [
-                html.Div("Bayesian Journey Dashboard", style={"fontWeight":"700","fontSize":"18px"}),
-                html.Div(
-                    [
-                        dcc.Input(id="excel-path", value=DEFAULT_PATH, placeholder="Excel 경로",
-                                  style={"width":"520px","marginRight":"8px"}),
-                        html.Button("Load", id="load-btn", n_clicks=0, className="btn", style={"marginRight":"8px"}),
-                    ],
-                    style={"display":"flex","alignItems":"center"},
-                ),
-            ],
-            style={"display":"flex","justifyContent":"space-between","alignItems":"center",
-                   "padding":"12px 16px","borderBottom":"1px solid #eee","position":"sticky",
-                   "top":"0","background":"#fafafa","zIndex":10},
-        ),
-
-        html.Div(id="status-msg", style={"padding":"8px 16px","color":"#555","fontSize":"12px"}),
-
-        # 필터
-        html.Div(
-            [
-                html.Div([html.Label("Segment", style={"fontWeight":"600"}),
-                          dcc.Dropdown(id="dd-seg", options=[], value="ALL", clearable=True)],
-                         style={"flex":"1","minWidth":"220px","marginRight":"8px"}),
-                html.Div([html.Label("Model",   style={"fontWeight":"600"}),
-                          dcc.Dropdown(id="dd-mod", options=[], value="ALL", clearable=True)],
-                         style={"flex":"1","minWidth":"220px","marginRight":"8px"}),
-                html.Div([html.Label("Loyalty", style={"fontWeight":"600"}),
-                          dcc.Dropdown(id="dd-loy", options=[], value="ALL", clearable=True)],
-                         style={"flex":"1","minWidth":"220px"}),
-            ],
-            style={"display":"flex","gap":"8px","padding":"12px 16px"},
-        ),
-
-        # KPI
-        html.Div(
-            [
-                html.Div([html.Div("표본 수", style={"color":"#888","fontSize":"12px"}),
-                          html.H3(id="kpi-sample", style={"margin":"4px 0 0"})], style=KPI_CARD_STYLE),
-                html.Div([html.Div("최종 구매율 (Δ 포함)", style={"color":"#888","fontSize":"12px"}),
-                          html.H3(id="ins-final", style={"margin":"4px 0 0"})], style=KPI_CARD_STYLE),
-                html.Div([html.Div("최대 드롭", style={"color":"#888","fontSize":"12px"}),
-                          html.H3(id="ins-drop", style={"margin":"4px 0 0","fontSize":"18px"})], style=KPI_CARD_STYLE),
-                html.Div([html.Div("불확실성 (95% HDI 폭)", style={"color":"#888","fontSize":"12px"}),
-                          html.H3(id="ins-uncert", style={"margin":"4px 0 0"})], style=KPI_CARD_STYLE),
-            ],
-            style={"display":"grid","gridTemplateColumns":"repeat(4,1fr)","gap":"12px","padding":"0 16px 12px"},
-        ),
-
-        # 숨김 KPI(호환)
-        html.Div([html.H3(id="kpi-buy-success"), html.H3(id="kpi-buy-fail")], style={"display":"none"}),
-
-        # Row 1: Sankey + 전이 퍼널 + (워터폴/PPC 탭)
-        html.Div(
-            [
-                html.Div(dcc.Graph(id="fig-sankey", config=GRAPH_CONFIG, style={"height":"400px"}),
-                         style={**CARD_STYLE, "height":"440px"}),
-
-                html.Div(dcc.Graph(id="fig-matrix", config=GRAPH_CONFIG, style={"height":"400px"}),
-                         style={**CARD_STYLE, "height":"440px"}),
-
-                html.Div(
-                    [
-                        dcc.Tabs(
-                            id="tab-right", value="waterfall",
-                            children=[
-                                dcc.Tab(label="워터폴", value="waterfall"),
-                                dcc.Tab(label="PPC(구매율)", value="ppc"),
-                            ],
-                            style={"marginBottom":"6px"},
-                        ),
-                        dcc.Graph(id="fig-right", config=GRAPH_CONFIG, style={"height":"400px"}),
-                    ],
-                    style={**CARD_STYLE, "height":"440px"},
-                ),
-            ],
-            style={
-                "display":"grid",
-                "gridTemplateColumns":"1.3fr 1fr 1.5fr",   # ← 오른쪽 카드 넓힘
-                "gap":"18px",
-                "padding":"30px 30px 30px", "marginBottom":"36px"
-            },
-        ),
-
-        # Row 2: 스테이지 리프트 + 포레스트 + 버블
-        html.Div(
-            [
-                html.Div(
-                    [
-                        html.Div(
-                            [
-                                html.Span("Stage", style={"fontSize":"12px","color":"#666","marginRight":"8px"}),
-                                dcc.Dropdown(
-                                    id="dd-stage-rank",
-                                    options=[{"label": v, "value": v} for v in ["선호","추천","구매의향","구매"]],
-                                    value="구매", clearable=False,
-                                    style={"width":"140px","fontSize":"12px"},
-                                ),
-                            ],
-                            style={"display":"flex","justifyContent":"flex-end","alignItems":"center","marginBottom":"6px"},
-                        ),
-                        dcc.Graph(id="fig-stage-rank", config=GRAPH_CONFIG, style={"height":"380px"}),
-                    ],
-                    style={**CARD_STYLE, "height":"420px","overflow":"hidden"},
-                ),
-
-                html.Div(dcc.Graph(id="fig-forest", config=GRAPH_CONFIG, style={"height":"380px"}),
-                         style={**CARD_STYLE, "height":"420px","overflow":"hidden"}),
-
-                html.Div(dcc.Graph(id="fig-bubble", config=GRAPH_CONFIG, style={"height":"380px"}),
-                         style={**CARD_STYLE, "height":"420px","overflow":"hidden"}),
-            ],
-            style={"display":"grid","gridTemplateColumns":"1fr 1fr 1fr","gap":"18px","padding":"30px 30px 30px", "marginTop":"36px"},
-        ),
-
-
-        # 숨김 그래프
-        html.Div(
-            [
-                dcc.Graph(id="fig-survival", config=GRAPH_CONFIG),
-                dcc.Graph(id="fig-funnel",   config=GRAPH_CONFIG),
-            ],
-            style={"display":"none"},
-        ),
-
-        # 상세 테이블
-        html.Div(
-            [
-                html.H4("상세 메트릭", style={"margin":"0 0 8px 0"}),
-                dash_table.DataTable(
-                    id="metrics-table",
-                    columns=[
-                        {"name": "단계",        "id": "단계"},
-                        {"name": "베이스수",    "id": "베이스수",    "type": "numeric",
-                         "format": Format(precision=0, scheme=Scheme.fixed)},
-                        {"name": "성공확률",    "id": "성공확률",    "type": "numeric", "format": percent1},
-                        {"name": "실패확률",    "id": "실패확률",    "type": "numeric", "format": percent1},
-                        {"name": "하한",        "id": "하한",        "type": "numeric", "format": percent1},
-                        {"name": "상한",        "id": "상한",        "type": "numeric", "format": percent1},
-                        {"name": "판정",        "id": "판정"},
-                        {"name": "평가등급",    "id": "평가등급"},
-                        {"name": "SNR",         "id": "SNR",         "type": "numeric", "format": num1},
-                        {"name": "Lift",        "id": "Lift",        "type": "numeric", "format": num1},
-                        {"name": "raw평균",     "id": "raw평균",     "type": "numeric", "format": percent1},
-                        {"name": "raw표준편차", "id": "raw표준편차", "type": "numeric", "format": percent1},
-                    ],
-                    data=[],
-                    page_size=10,
-                    style_table={"overflowX":"auto"},
-                    style_cell={
-                        "fontFamily":"Noto Sans KR, Arial, sans-serif",
-                        "fontSize":"12px",
-                        "padding":"6px",
-                    },
-                    style_header={"fontWeight":"bold"},
-                    style_data_conditional=[
-                        {"if": {"column_id": "베이스수"},     "textAlign": "right"},
-                        {"if": {"column_id": "성공확률"},     "textAlign": "right"},
-                        {"if": {"column_id": "실패확률"},     "textAlign": "right"},
-                        {"if": {"column_id": "하한"},         "textAlign": "right"},
-                        {"if": {"column_id": "상한"},         "textAlign": "right"},
-                        {"if": {"column_id": "SNR"},          "textAlign": "right"},
-                        {"if": {"column_id": "Lift"},         "textAlign": "right"},
-                        {"if": {"column_id": "raw평균"},      "textAlign": "right"},
-                        {"if": {"column_id": "raw표준편차"},  "textAlign": "right"},
-                        {"if": {"row_index": "odd"}, "backgroundColor": "#fafafa"},
-                    ],
-                ),
-            ],
-            style={**CARD_STYLE, "margin":"18px 16px 24px"},
-        ),
-    ],
-    style={"background":"#f6f7fb","minHeight":"100vh"},
-)
-# ───────────────── app.layout 교체 끝 ─────────────────
 
 # ===================== 콜백: Load =====================
 @app.callback(
