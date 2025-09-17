@@ -14,7 +14,7 @@
 (과거 데이터 분석 시 베이지안을 사용하지 않았더라도, 호환이 가능)
 
 # 주 사용 라이브러리
-📍PyMC(베이지안 추정), NumPy / Pandas (연산/집계), SciPy(MLE 최적화)
+📍PyMC(베이지안 추정), NumPy / Pandas (연산/집계), SciPy(MLE 최적화) / plotly(Dashboard)
 
 # 변수
 📍구매고객 데이터: 가격대별 Segment(Highend/Midrange/Lowend), 모델별 Segment, 브랜드 충성도별 Segment\
@@ -32,7 +32,8 @@
 
 
 ## 대시보드 구축단계
-📍 Interaction Chart 구축
+📍Interaction Chart 구축
+📍gunicorn
 
 ## 예시이미지
 ![Dashboard Example](assets/example1.png)
