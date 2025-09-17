@@ -1,5 +1,6 @@
 # 주의사항
 📍데이터는 임의로 만든 예시데이터셋이며, 실제 해당 Product Group 및 브랜드의 마켓 조사데이터와 관련성 없음(자체제작 데이터)
+📍Bayesian_analysis.py / Dashboard.py에는 간단한 로직만이 수록되어 있음
 
 # bayesian_dashboard
 세그·모델·충성도별로 ‘선호→추천의향→구매의향→실제구매’ 퍼널 전환율을 위계적 베이지안으로 추정\
@@ -32,9 +33,6 @@
 
 ## 대시보드 구축단계
 📍 Interaction Chart 구축
-
-## 사용방법
-Bayesian_analysis.py 실행 후 산출된 Dashboard.py 내 그래프 파라미터 조정하여 활용
 
 ## 예시이미지
 ![Dashboard Example](assets/example1.png)
