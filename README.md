@@ -1,5 +1,5 @@
 # 주의사항
-📍데이터는 임의로 만든 예시데이터셋이며, 실제 해당 Product Group 및 브랜드의 마켓 조사데이터와 관련성 없음(자체제작 데이터)
+📍데이터는 임의로 만든 예시데이터셋이며, 실제 해당 Product Group 및 브랜드의 마켓 조사데이터와 무관함(자체제작 데이터)\
 📍Bayesian_analysis.py / Dashboard.py에는 간단한 로직만이 수록되어 있음
 
 # bayesian_dashboard
