@@ -42,6 +42,144 @@ import os
 app = Dash(__name__)
 server = app.server   # 🔴 추가: Gunicorn이 이 server를 사용함
 
+# ======================================
+# 인터랙션 공용 설정 & 기본 경로 & 유틸
+# ======================================
+import json, io
+import pandas as pd
+
+GRAPH_CONFIG = {
+    "displayModeBar": True,
+    "scrollZoom": True,          # 휠로 줌
+    "doubleClick": "reset",      # 더블클릭 리셋
+    "modeBarButtonsToAdd": ["lasso2d", "select2d"],
+    "showTips": True,
+}
+
+# 기본 엑셀 경로 (로컬 개발용, 배포 시에는 무시되거나 다른 로더 사용)
+DEFAULT_PATH = "assets/bayesian_analysis_total_v1.xlsx"
+
+# ===================== 레벨 상수 =====================
+LEVEL_OVERALL = "전체"; LEVEL_SEGMENT = "세그먼트"; LEVEL_MODEL = "모델"
+LEVEL_LOYALTY = "충성도"; LEVEL_SEG_X_LOY = "세그×충성도"
+LEVEL_SEG_X_MODEL = "세그×모델"; LEVEL_MODEL_X_LOY = "모델×충성도"
+LEVEL_MOD_X_SEG_X_LOY = "모델×세그×충성도"
+
+# === 정규화 ===
+ALL_ALIASES = {"ALL","all","All","", " ", "  ", "전체",
+               "NONE","None","none","nan","NaN", None}
+LVL_ALIASES = {
+    "모델전체×세그×충성도": "모델×세그×충성도",
+    "세그x모델": "세그×모델",
+    "모델x충성도": "모델×충성도",
+    "세그x충성도": "세그×충성도",
+}
+
+def _as_all(v) -> str:
+    s = "ALL" if v is None else str(v).strip()
+    return "ALL" if s in ALL_ALIASES else s
+
+def _ensure_key_cols(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+    for c in ["analysis_level","segment","model","loyalty"]:
+        if c not in df.columns:
+            df[c] = "ALL"
+        df[c] = (
+            df[c].astype(str).str.strip()
+              .replace({
+                  "": "ALL", "전체":"ALL",
+                  "NONE":"ALL","None":"ALL","none":"ALL",
+                  "nan":"ALL","NaN":"ALL",
+                  "ALL":"ALL","All":"ALL","all":"ALL"
+              })
+              .fillna("ALL")
+        )
+    if "level" not in df.columns:
+        df["level"] = df["analysis_level"] if "analysis_level" in df.columns else "전체"
+    df["level"] = (
+        df["level"].astype(str).str.strip()
+          .replace({"ALL":"전체","All":"전체","all":"전체"})
+          .replace(LVL_ALIASES)
+    )
+    if "analysis_level" in df.columns:
+        df["analysis_level"] = df["analysis_level"].replace(LVL_ALIASES)
+    return df
+
+# ---- Store JSON 로더 & 스왑 감지 유틸 ----
+def _looks_split_df_json(s: str) -> bool:
+    try:
+        o = json.loads(s)
+        return isinstance(o, dict) and {"columns","index","data"}.issubset(set(o.keys()))
+    except Exception:
+        return False
+
+def _looks_overall_json(s: str) -> bool:
+    try:
+        o = json.loads(s)
+        return isinstance(o, dict) and any(k in o for k in ("pref_mean","rec_mean","intent_mean","buy_mean"))
+    except Exception:
+        return False
+
+def _safe_read_df_split(js: str | dict | None) -> pd.DataFrame:
+    if js is None:
+        return pd.DataFrame()
+    if isinstance(js, dict):
+        if {"columns","index","data"}.issubset(set(js.keys())):
+            return pd.read_json(io.StringIO(json.dumps(js)), orient="split")
+        return pd.DataFrame()
+    try:
+        return pd.read_json(io.StringIO(js), orient="split")
+    except Exception:
+        return pd.DataFrame()
+
+def _safe_read_overall(js: str | dict | None) -> dict:
+    if js is None:
+        return {}
+    if isinstance(js, dict):
+        return js
+    try:
+        o = json.loads(js)
+        return o if isinstance(o, dict) else {}
+    except Exception:
+        return {}
+
+def _maybe_swap_sankey_overall(js_sankey, js_overall):
+    try:
+        if isinstance(js_sankey, str) and _looks_overall_json(js_sankey) \
+           and isinstance(js_overall, str) and _looks_split_df_json(js_overall):
+            return js_overall, js_sankey, True
+    except Exception:
+        pass
+    return js_sankey, js_overall, False
+
+_read_df_store = _safe_read_df_split
+_read_overall  = _safe_read_overall
+
+def _rebuild_hkey_using_level(df: pd.DataFrame) -> pd.DataFrame:
+    df = _ensure_key_cols(df).copy()
+    if "level" in df.columns and df["level"].notna().any():
+        pass
+    elif "analysis_level" in df.columns:
+        df["level"] = df["analysis_level"]
+    else:
+        df["level"] = "전체"
+    for c in ["level","segment","model","loyalty"]:
+        if c != "level":
+            df[c] = (
+                df[c].astype(str).str.strip()
+                  .replace({"": "ALL","전체":"ALL","NONE":"ALL","None":"ALL","none":"ALL","nan":"ALL","NaN":"ALL"})
+                  .fillna("ALL")
+            )
+    df["level"] = df["level"].replace(LVL_ALIASES)
+    df["hierarchy_key"] = df["level"] + "|" + df["segment"] + "|" + df["model"] + "|" + df["loyalty"]
+    return df
+
+def sample_col_in_df(df) -> str | None:
+    for c in ["pref_sample_size","sample_size","n","N","base","베이스수","표본수"]:
+        if c in df.columns: return c
+    return None
+
+
 # ====== app.py (상단) ======
 import os
 from dash import Dash, html, dcc, dash_table
@@ -310,149 +448,6 @@ def serve_layout():
 
 # 레이아웃 지정
 app.layout = serve_layout
-
-# ====== (여기 아래에) 콜백/데이터 로딩/그래프 생성 함수들 이어서 작성 ======
-
-
-
-
-# ======== 인터랙션 공용 설정 ========
-GRAPH_CONFIG = {
-    "displayModeBar": True,
-    "scrollZoom": True,          # 휠로 줌
-    "doubleClick": "reset",      # 더블클릭 리셋
-    "modeBarButtonsToAdd": ["lasso2d", "select2d"],
-    "showTips": True,
-}
-
-# ===================== 기본 경로 =====================
-DEFAULT_PATH = r"/content/drive/MyDrive/baye_dash/bayesian_analysis_total_v1.xlsx"
-
-# ===================== 레벨 상수 =====================
-LEVEL_OVERALL="전체"; LEVEL_SEGMENT="세그먼트"; LEVEL_MODEL="모델"
-LEVEL_LOYALTY="충성도"; LEVEL_SEG_X_LOY="세그×충성도"
-LEVEL_SEG_X_MODEL="세그×모델"; LEVEL_MODEL_X_LOY="모델×충성도"
-LEVEL_MOD_X_SEG_X_LOY="모델×세그×충성도"
-
-# === 정규화 ===
-ALL_ALIASES = {"ALL","all","All","", " ", "  ", "전체", "NONE","None","none","nan","NaN", None}
-LVL_ALIASES = {
-    "모델전체×세그×충성도": "모델×세그×충성도",
-    "세그x모델": "세그×모델",
-    "모델x충성도": "모델×충성도",
-    "세그x충성도": "세그×충성도",
-}
-
-def _as_all(v) -> str:
-    s = "ALL" if v is None else str(v).strip()
-    return "ALL" if s in ALL_ALIASES else s
-
-def _ensure_key_cols(df: pd.DataFrame) -> pd.DataFrame:
-    df = df.copy()
-    for c in ["analysis_level","segment","model","loyalty"]:
-        if c not in df.columns:
-            df[c] = "ALL"
-        df[c] = (
-            df[c].astype(str).str.strip()
-              .replace({
-                  "": "ALL", "전체":"ALL",
-                  "NONE":"ALL","None":"ALL","none":"ALL",
-                  "nan":"ALL","NaN":"ALL",
-                  "ALL":"ALL","All":"ALL","all":"ALL"
-              })
-              .fillna("ALL")
-        )
-    if "level" not in df.columns:
-        df["level"] = df["analysis_level"] if "analysis_level" in df.columns else "전체"
-    df["level"] = (
-        df["level"].astype(str).str.strip()
-          .replace({"ALL":"전체","All":"전체","all":"전체"})
-          .replace(LVL_ALIASES)
-    )
-    if "analysis_level" in df.columns:
-        df["analysis_level"] = df["analysis_level"].replace(LVL_ALIASES)
-    return df
-
-# ---- Store JSON 로더 & 스왑 감지 유틸 ----
-def _looks_split_df_json(s: str) -> bool:
-    try:
-        o = json.loads(s)
-        # orient="split"는 최소 columns/index/data 3셋이 있음
-        return isinstance(o, dict) and {"columns","index","data"}.issubset(set(o.keys()))
-    except Exception:
-        return False
-
-def _looks_overall_json(s: str) -> bool:
-    try:
-        o = json.loads(s)
-        return isinstance(o, dict) and any(k in o for k in ("pref_mean","rec_mean","intent_mean","buy_mean"))
-    except Exception:
-        return False
-
-def _safe_read_df_split(js: str | dict | None) -> pd.DataFrame:
-    if js is None:
-        return pd.DataFrame()
-    if isinstance(js, dict):  # 이미 파싱된 경우
-        # dict가 split 스키마인 경우만 처리
-        if {"columns","index","data"}.issubset(set(js.keys())):
-            return pd.read_json(io.StringIO(json.dumps(js)), orient="split")
-        return pd.DataFrame()
-    # str
-    try:
-        return pd.read_json(io.StringIO(js), orient="split")
-    except Exception:
-        return pd.DataFrame()
-
-def _safe_read_overall(js: str | dict | None) -> dict:
-    if js is None:
-        return {}
-    if isinstance(js, dict):
-        return js
-    try:
-        o = json.loads(js)
-        return o if isinstance(o, dict) else {}
-    except Exception:
-        return {}
-
-def _maybe_swap_sankey_overall(js_sankey, js_overall):
-    """
-    sankey 캐시와 overall이 뒤바뀌어 들어온 경우 자동 교정.
-    (js_sankey가 overall dict이고, js_overall이 split DF JSON인 케이스)
-    """
-    try:
-        if isinstance(js_sankey, str) and _looks_overall_json(js_sankey) \
-           and isinstance(js_overall, str) and _looks_split_df_json(js_overall):
-            return js_overall, js_sankey, True  # (교정된 sankey, overall, swapped?)
-    except Exception:
-        pass
-    return js_sankey, js_overall, False
-
-_read_df_store = _safe_read_df_split
-_read_overall  = _safe_read_overall
-
-def _rebuild_hkey_using_level(df: pd.DataFrame) -> pd.DataFrame:
-    df = _ensure_key_cols(df).copy()
-    if "level" in df.columns and df["level"].notna().any():
-        pass
-    elif "analysis_level" in df.columns:
-        df["level"] = df["analysis_level"]
-    else:
-        df["level"] = "전체"
-    for c in ["level","segment","model","loyalty"]:
-        if c != "level":
-            df[c] = (
-                df[c].astype(str).str.strip()
-                  .replace({"": "ALL","전체":"ALL","NONE":"ALL","None":"ALL","none":"ALL","nan":"ALL","NaN":"ALL"})
-                  .fillna("ALL")
-            )
-    df["level"] = df["level"].replace(LVL_ALIASES)
-    df["hierarchy_key"] = df["level"] + "|" + df["segment"] + "|" + df["model"] + "|" + df["loyalty"]
-    return df
-
-def sample_col_in_df(df) -> str | None:
-    for c in ["pref_sample_size","sample_size","n","N","base","베이스수","표본수"]:
-        if c in df.columns: return c
-    return None
 
 # ==== 비공개 유량 스케일 ====
 FLOW_GLOBAL = True
