@@ -34,6 +34,12 @@ def _flow_scale(seg, mod, loy):
     h = int(hashlib.sha256(key.encode("utf-8")).hexdigest()[:8], 16)
     return 7.5 + (h % 1100) / 100.0
 
+from dash import Dash, html, dcc  # 기존 import 유지
+import os
+
+app = Dash(__name__)
+server = app.server   # 🔴 추가: Gunicorn이 이 server를 사용함
+
 # ======== 인터랙션 공용 설정 ========
 GRAPH_CONFIG = {
     "displayModeBar": True,
@@ -2783,13 +2789,9 @@ def update_all(seg, mod, loy, drag_val, stage_label, tab_right,
 
 # ===================== 실행 =====================
 if __name__ == "__main__":
-    base_port = int(os.getenv("PORT", "8059"))
-    for i in range(5):
-        try:
-            app.run_server(host="0.0.0.0", port=base_port + i, debug=False, use_reloader=False)
-            break
-        except (OSError, SystemExit) as e:
-            if "Address already in use" in str(e) or getattr(e, "code", None) == 1:
-                continue
-            raise
+    app.run_server(
+        host="0.0.0.0",
+        port=int(os.getenv("PORT", 8050)),
+        debug=False
+    )
 
