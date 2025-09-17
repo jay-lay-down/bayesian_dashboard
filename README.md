@@ -34,4 +34,4 @@
 Bayesian_analysis.py 실행 후 산출된 Dashboard.py 내 그래프 파라미터 조정하여 활용
 
 ## 예시이미지
-
+![Dashboard Example](assets/example1.png)
