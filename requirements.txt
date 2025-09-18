@@ -1,18 +1,9 @@
-dash>=2.14
-plotly>=5.18
-pandas>=2.0
-numpy>=1.24
-openpyxl>=3.1
-
-# .xls 파일까지 열 때만
-# xlrd==1.2.0
-
-# CI 계산용: 둘 중 하나만 선택
-scipy>=1.10
-# statsmodels>=0.13
-# ↑ scipy 쓰면 statsmodels는 주석
-#   statsmodels 쓸 거면 scipy는 빼고 이 줄만 활성화
-# 배포용이면
+Dash
+Flask
+Flask-Compress
+Flask-Caching
 gunicorn
-# 캐싱 쓰면
-flask-caching
+pandas
+numpy
+openpyxl
+plotly
