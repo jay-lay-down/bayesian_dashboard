@@ -17,6 +17,9 @@ from dash.dash_table import FormatTemplate
 from dash.dash_table.Format import Format, Scheme
 import dash
 
+from pathlib import Path
+import glob
+
 # ========= 앱 & 서버 (단 한 번만) ============================================
 app = Dash(
     __name__,
@@ -456,6 +459,57 @@ def serve_layout():
 
 # 레이아웃 지정
 app.layout = serve_layout
+
+
+def _resolve_excel_path(path_in: str | None) -> str:
+    """
+    Render/로컬 어디서든 엑셀 절대경로를 안정적으로 찾아 반환.
+    우선순위: 명시 경로/파일명 → ENV → 여러 후보 → rglob.
+    """
+    # 0) 명시 경로가 바로 절대경로 + 존재 → 그대로
+    if path_in and os.path.isabs(path_in) and os.path.exists(path_in):
+        return path_in
+
+    # 1) 파일명만 들어오면 기본 이름 처리
+    name = (str(path_in).strip() if path_in else "bayesian_analysis_total_v1.xlsx")
+
+    # 2) ENV 우선 (Render 대시보드에 EXCEL_PATH 설정하면 최우선)
+    envp = os.environ.get("EXCEL_PATH")
+    if envp and os.path.exists(envp):
+        return envp
+
+    # 3) 후보 절대경로들 (Render/로컬 공용)
+    here = Path(__file__).resolve().parent
+    candidates = [
+        name,  # 현재 CWD
+        str(here / name),
+        str(here / "assets" / name),
+        "/opt/render/project/src/" + name,
+        "/opt/render/project/src/assets/" + name,
+        "/app/" + name,
+        "/app/assets/" + name,
+    ]
+
+    for c in candidates:
+        if c and os.path.exists(c):
+            return c
+
+    # 4) 마지막으로 프로젝트 루트 기준 rglob
+    try_roots = [here, here.parent, Path("/opt/render/project/src")]
+    for root in try_roots:
+        try:
+            hit = next(root.rglob(name))
+            return str(hit)
+        except StopIteration:
+            pass
+
+    # 5) 실패 시 후보를 에러에 그대로 남김
+    raise FileNotFoundError(
+        "엑셀 파일을 찾을 수 없습니다. tried=\n" + "\n".join(candidates)
+    )
+
+
+
 
 
 # ================== Plotly Shape 유틸 (그대로 사용) ==================
