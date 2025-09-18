@@ -32,8 +32,13 @@
 
 
 ## 대시보드 구축단계
-📍Interaction Chart 구축
+📍Interaction Chart 구축\
 📍gunicorn
+
+## 대시보드 불러오기
+
+
 
 ## 예시이미지
 ![Dashboard Example](assets/example1.png)
+
