@@ -6,6 +6,7 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import plotly.express as px
+import glob
 
 from flask import Response
 from flask_compress import Compress
@@ -815,39 +816,43 @@ def apply_dense_grid(fig: go.Figure, x_prob: bool = False, y_prob: bool = False)
 
     # 4) 확률축(0~1) 포맷
     if x_prob:
-        xr = (getattr(fig.layout.xaxis, "range", None) or [0, 1])
-        span = (xr[1] - xr[0]) if isinstance(xr, (list, tuple)) and len(xr) == 2 else 1.0
+        try:
+            xr = getattr(fig.layout.xaxis, "range", None)
+            span = (xr[1] - xr[0]) if isinstance(xr, (list, tuple)) and len(xr) == 2 else 1.0
+        except Exception:
+            span = 1.0
         fig.update_xaxes(tick0=0, dtick=_auto_dtick(span), tickformat=".0%")
     if y_prob:
-        yr = (getattr(fig.layout.yaxis, "range", None) or [0, 1])
-        span = (yr[1] - yr[0]) if isinstance(yr, (list, tuple)) and len(yr) == 2 else 1.0
+        try:
+            yr = getattr(fig.layout.yaxis, "range", None)
+            span = (yr[1] - yr[0]) if isinstance(yr, (list, tuple)) and len(yr) == 2 else 1.0
+        except Exception:
+            span = 1.0
         fig.update_yaxes(tick0=0, dtick=_auto_dtick(span), tickformat=".0%")
 
     # 5) 인터랙션 상태 유지
     fig.update_layout(uirevision="keep")
 
-    # 6) 레이아웃 shape 잔재(x0shift 등) 전역 스크럽
+    # 6) 레이아웃 shape 정제(스크럽 → sanitize)
     try:
-        fig = _scrub_layout_shapes(fig)  # sanitize_shape_dict를 내부에서 활용
+        fig = _scrub_layout_shapes(fig)  # (있으면) shape dict 정리
+    except Exception:
+        pass
+    try:
+        sanitize_fig_shapes(fig)         # (있으면) 추가 정제
     except Exception:
         pass
 
     return fig
-
-
-    # ★ 여기 추가: 모든 shape 정제
-    try:
-        sanitize_fig_shapes(fig)
-    except Exception:
-        pass
-
-    return fig
-
-
+    
 # ---- Excel 오픈(엔진 폴백 + 디버그 수집) ----
 def _open_excel_with_fallback(path: str):
+    ext = str(path).lower().strip().rsplit(".", 1)[-1] if "." in str(path) else ""
+    if ext == "csv":
+        return None, "csv"  # CSV는 ExcelFile 쓰지 않음
+
     errs = []
-    for eng in ["openpyxl", None, "xlrd"]:
+    for eng in ["calamine", "openpyxl", None, "xlrd"]:
         try:
             xls = pd.ExcelFile(path, engine=eng) if eng else pd.ExcelFile(path)
             return xls, (eng or "auto")
@@ -857,6 +862,8 @@ def _open_excel_with_fallback(path: str):
 
 def _find_sheet(xls: pd.ExcelFile, candidates):
     names = xls.sheet_names
+    if not names:
+        return None
     norm = lambda s: re.sub(r"\s+", "", str(s)).lower()
     names_norm = {norm(n): n for n in names}
     for cand in candidates:
@@ -864,33 +871,62 @@ def _find_sheet(xls: pd.ExcelFile, candidates):
         for k, orig in names_norm.items():
             if cn in k:
                 return orig
-    return None
+    return names[0]  # 후보 못 찾으면 첫 시트
 
 def load_excel(path: str):
+    path = os.path.expanduser(str(path)).strip()
+
+    # 폴더가 들어오면 첫 xlsx/xls/csv 자동 선택
+    if os.path.isdir(path):
+        for patt in ("*.xlsx","*.xls","*.csv"):
+            found = glob.glob(os.path.join(path, patt))
+            if found:
+                path = found[0]; break
+
     if not os.path.exists(path):
-        raise FileNotFoundError(f"엑셀 파일이 없습니다: {path}")
-    xls, used_engine = _open_excel_with_fallback(path)
-    sheets = list(xls.sheet_names)
+        raise FileNotFoundError(f"엑셀/CSV 파일이 없습니다: {path}")
 
-    sh_master = _find_sheet(xls, ["VBA마스터테이블", "마스터", "master", "mastertable", "마스터테이블"])
-    sh_tm     = _find_sheet(xls, ["베이지안전이확률매트릭스", "전이확률", "transition", "matrix"])
-    sh_sankey = _find_sheet(xls, ["베이지안생키다이어그램", "생키", "sankey", "flow"])
+    # CSV 단독 처리
+    if str(path).lower().endswith(".csv"):
+        df_master = _norm_cols(pd.read_csv(path))
+        df_tm = pd.DataFrame(); df_sankey = pd.DataFrame()
+        used_engine = "csv"; sheets = ["<csv>"]
+        dbg = {"engine": used_engine, "sheets": sheets,
+               "matched": {"master": "<csv>", "tm": None, "sankey": None}}
+    else:
+        xls, used_engine = _open_excel_with_fallback(path)
+        sheets = list(xls.sheet_names)
 
-    dbg = {"engine": used_engine, "sheets": sheets,
-           "matched": {"master": sh_master, "tm": sh_tm, "sankey": sh_sankey}}
+        sh_master = _find_sheet(xls, ["VBA마스터테이블", "마스터", "master", "mastertable", "마스터테이블"])
+        sh_tm     = _find_sheet(xls, ["베이지안전이확률매트릭스", "전이확률", "transition", "matrix"])
+        sh_sankey = _find_sheet(xls, ["베이지안생키다이어그램", "생키", "sankey", "flow"])
 
-    if not sh_master:
-        raise ValueError(f"필수 시트(마스터) 미발견 | sheets={sheets}")
+        dbg = {"engine": used_engine, "sheets": sheets,
+               "matched": {"master": sh_master, "tm": sh_tm, "sankey": sh_sankey}}
 
-    df_master = _norm_cols(pd.read_excel(xls, sh_master))
-    df_tm     = _norm_cols(pd.read_excel(xls, sh_tm)) if sh_tm else pd.DataFrame()
-    df_sankey = _norm_cols(pd.read_excel(xls, sh_sankey)) if sh_sankey else pd.DataFrame()
+        if not sh_master:
+            sh_master = sheets[0]  # 최소한 첫 시트라도
 
-    df_master = _rebuild_hkey_using_level(df_master)
-    if not df_tm.empty: df_tm = _rebuild_hkey_using_level(df_tm)
-    if not df_sankey.empty: df_sankey = _rebuild_hkey_using_level(df_sankey)
+        df_master = _norm_cols(pd.read_excel(xls, sh_master))
+        try:    df_tm = _norm_cols(pd.read_excel(xls, sh_tm)) if sh_tm else pd.DataFrame()
+        except: df_tm = pd.DataFrame()
+        try:    df_sankey = _norm_cols(pd.read_excel(xls, sh_sankey)) if sh_sankey else pd.DataFrame()
+        except: df_sankey = pd.DataFrame()
 
-    def col(name): return df_master.get(name, pd.Series(np.nan, index=df_master.index))
+    # 키/레벨 재구성 (있으면만)
+    try: df_master = _rebuild_hkey_using_level(df_master)
+    except: pass
+    if not df_tm.empty:
+        try: df_tm = _rebuild_hkey_using_level(df_tm)
+        except: pass
+    if not df_sankey.empty:
+        try: df_sankey = _rebuild_hkey_using_level(df_sankey)
+        except: pass
+
+    def col(name):
+        return df_master.get(name, pd.Series(np.nan, index=df_master.index)) if not df_master.empty \
+               else pd.Series(np.nan, index=pd.RangeIndex(1))
+
     overall = {
         "pref_mean":   float(np.nanmean(col("pref_success_rate"))),
         "rec_mean":    float(np.nanmean(col("rec_success_rate"))),
@@ -902,9 +938,15 @@ def load_excel(path: str):
         "buy_sd":      float(np.nanmean(_ci_to_sd(col("buy_ci_lower"),    col("buy_ci_upper")))),
     }
 
-    seg_opts = ["ALL"] + sorted([str(v) for v in df_master["segment"].dropna().unique() if str(v)!="ALL"])
-    loy_opts = ["ALL"] + sorted([str(v) for v in df_master["loyalty"].dropna().unique() if str(v)!="ALL"])
-    mod_opts_all = ["ALL"] + sorted([str(v) for v in df_master["model"].dropna().unique() if str(v)!="ALL"])
+    def _opts(df, key):
+        if df is None or df.empty or key not in df.columns:
+            return ["ALL"]
+        vals = [str(v) for v in df[key].dropna().unique() if str(v)!="ALL"]
+        return ["ALL"] + sorted(vals)
+
+    seg_opts = _opts(df_master, "segment")
+    loy_opts = _opts(df_master, "loyalty")
+    mod_opts_all = _opts(df_master, "model")
 
     return df_master, df_tm, df_sankey, overall, seg_opts, mod_opts_all, loy_opts, dbg
 
