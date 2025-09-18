@@ -31,25 +31,29 @@ DATA_XLSX_PATH = os.getenv("DATA_XLSX_PATH", "data/bayesian_analysis_total_v1.xl
 DEFAULT_PATH   = DATA_XLSX_PATH  # (레거시 호환용: 예전 코드가 DEFAULT_PATH를 참조해도 OK)
 
 # ========= 캐시 & 로더 (재귀 방지 포함) =======================================
+from flask_caching import Cache
+import hashlib, os, time
+import pandas as pd
+
+# 0) 캐시 초기화
 cache = Cache(config={"CACHE_TYPE": "SimpleCache", "CACHE_DEFAULT_TIMEOUT": 600})
 cache.init_app(server)
 
-# ✅ 원본 read_excel을 먼저 보관(재귀 방지용)
+# 1) 원본 read_excel 백업 (재귀 방지용) ➜ load_df 정의 '보다 위'
 _ORIG_READ_EXCEL = pd.read_excel
 
+# 2) 파일 버전 해시 (수정시각+사이즈)
 def _file_version(path: str) -> str:
-    """수정시각+사이즈 기반 버전 해시 (파일 바뀌면 키가 바뀌어 캐시 미스)"""
     st = os.stat(path)
     sig = f"{st.st_mtime_ns}-{st.st_size}"
     return hashlib.md5(sig.encode()).hexdigest()
 
+# 3) 캐시되는 로더: 반드시 '원본' 판다스로 읽기
 @cache.memoize(timeout=600)
 def load_df(file_ver: str) -> pd.DataFrame:
-    """버전을 키로 메모이즈 → 파일 갱신 시 자동 재로딩"""
-    # 재귀 방지: 반드시 원본 판다스로 읽는다
     return _ORIG_READ_EXCEL(DATA_XLSX_PATH, engine="openpyxl")
 
-# ✅ 기본 데이터 파일만 캐시 경유하도록 얇은 래퍼
+# 4) 기본 데이터 파일만 캐시 경유하도록 얇은 래퍼
 def _is_default_path(arg) -> bool:
     try:
         p = str(arg).replace("\\", "/")
@@ -62,7 +66,7 @@ def _cached_read_excel(*args, **kwargs):
         return load_df(_file_version(DATA_XLSX_PATH))
     return _ORIG_READ_EXCEL(*args, **kwargs)
 
-# 판다스 read_excel을 래핑
+# 5) 판다스 함수 래핑 (마지막에)
 pd.read_excel = _cached_read_excel
 
 # ========= Health / Refresh 엔드포인트 =======================================
@@ -452,19 +456,13 @@ def serve_layout():
 # 레이아웃 지정
 app.layout = serve_layout
 
-# ==== 비공개 유량 스케일 ====
-FLOW_GLOBAL = True
-GLOBAL_K = 11.3
 
-# ==== 공용: Shape-safe helpers (가짜 키 자동 차단 + 보정) ====
-
+# ================== Plotly Shape 유틸 (그대로 사용) ==================
 _ALLOWED_SHAPE_KEYS = {
     "editable","fillcolor","fillrule","label","layer","legend","legendgroup","legendgrouptitle",
     "legendrank","legendwidth","line","name","opacity","path","showlegend","templateitemname",
     "type","visible","x0","x1","xanchor","xref","xsizemode","y0","y1","yanchor","yref","ysizemode",
 }
-
-# 여기가 문제의 가짜 키들
 _SHIFT_KEYS = ("x0shift", "x1shift", "y0shift", "y1shift")
 
 def _line_from_kwargs(kwargs: dict):
@@ -475,94 +473,57 @@ def _line_from_kwargs(kwargs: dict):
     return {k: v for k, v in line.items() if v is not None}
 
 def _clean_shape_kwargs(kwargs: dict):
-    """
-    1) *_shift 키 제거
-    2) line_* → line 병합
-    3) 허용 키만 남기기
-    """
     kwargs = dict(kwargs)  # shallow copy
-    # 1) 가짜 shift 키 모두 제거
     for k in _SHIFT_KEYS:
         kwargs.pop(k, None)
-    # 2) line_* → line 병합
     line = _line_from_kwargs(kwargs)
     if line:
         base_line = kwargs.get("line") or {}
         kwargs["line"] = {**base_line, **line}
-    # 3) 허용 키만 통과
     return {k: v for k, v in kwargs.items() if (k in _ALLOWED_SHAPE_KEYS and v is not None)}
 
 def add_vline_safe(fig, x, **kwargs):
-    """세로 기준선(가짜 키 차단, line_* 병합)"""
-    base = dict(
-        type="line", xref="x", x0=float(x), x1=float(x),
-        yref="paper", y0=0, y1=1,
-        layer=kwargs.pop("layer", "above"),
-    )
+    base = dict(type="line", xref="x", x0=float(x), x1=float(x), yref="paper", y0=0, y1=1,
+                layer=kwargs.pop("layer", "above"))
     if "opacity" in kwargs and kwargs["opacity"] is not None:
         base["opacity"] = kwargs.pop("opacity")
     base.update(_clean_shape_kwargs(kwargs))
     return fig.add_shape(**base)
 
 def add_hline_safe(fig, y, **kwargs):
-    """가로 기준선(가짜 키 차단, line_* 병합)"""
-    base = dict(
-        type="line", yref="y", y0=float(y), y1=float(y),
-        xref="paper", x0=0, x1=1,
-        layer=kwargs.pop("layer", "above"),
-    )
+    base = dict(type="line", yref="y", y0=float(y), y1=float(y), xref="paper", x0=0, x1=1,
+                layer=kwargs.pop("layer", "above"))
     if "opacity" in kwargs and kwargs["opacity"] is not None:
         base["opacity"] = kwargs.pop("opacity")
     base.update(_clean_shape_kwargs(kwargs))
     return fig.add_shape(**base)
 
 def add_vrect_safe(fig, x0, x1, **kwargs):
-    """
-    add_vrect 대체: x0shift/x1shift를 값에 반영 후 제거하고,
-    나머지 키는 안전하게 정리해서 rect shape로 추가.
-    """
-    # ── shift 보정 ──
     dx0 = float(kwargs.pop("x0shift", 0) or 0)
     dx1 = float(kwargs.pop("x1shift", 0) or 0)
     x0 = float(x0) + dx0
     x1 = float(x1) + dx1
-
-    # yref 자동 판정(명시가 있으면 존중)
     yref = kwargs.pop("yref", None)
     has_y = ("y0" in kwargs) or ("y1" in kwargs)
     if yref is None:
         yref = "y" if has_y else "paper"
-
-    # paper 좌표 기본값
     y0_default, y1_default = (0, 1) if yref == "paper" else (None, None)
-
     base = dict(
-        type="rect", xref="x", x0=x0, x1=x1,
-        yref=yref, y0=kwargs.pop("y0", y0_default), y1=kwargs.pop("y1", y1_default),
+        type="rect", xref="x", x0=x0, x1=x1, yref=yref,
+        y0=kwargs.pop("y0", y0_default), y1=kwargs.pop("y1", y1_default),
         layer=kwargs.pop("layer", "below"),
         fillcolor=kwargs.pop("fillcolor", "rgba(0,0,0,0.06)"),
     )
     if base["yref"] == "y":
-        # 데이터 축이면 None인 y0/y1 제거
         if base.get("y0") is None: base.pop("y0", None)
         if base.get("y1") is None: base.pop("y1", None)
-
     if "opacity" in kwargs and kwargs["opacity"] is not None:
         base["opacity"] = kwargs.pop("opacity")
-
     base.update(_clean_shape_kwargs(kwargs))
     return fig.add_shape(**base)
 
-# (선택) 만약 어딘가에서 layout.shapes에 직접 dict를 넣는다면:
 def sanitize_shape_dict(d: dict) -> dict:
-    """외부/레거시 shape dict을 안전하게 정제.
-       - x0shift/x1shift/y0shift/y1shift 값을 좌표에 반영하고 키 제거
-       - line_* 키 병합
-       - 허용되지 않는 키 삭제
-    """
     d = dict(d or {})
-
-    # 1) shift -> 좌표 반영
     for sh_key, coord_key in (("x0shift","x0"),("x1shift","x1"),("y0shift","y0"),("y1shift","y1")):
         if sh_key in d:
             try:
@@ -572,8 +533,6 @@ def sanitize_shape_dict(d: dict) -> dict:
                     d.pop(sh_key, None)
             except Exception:
                 d.pop(sh_key, None)
-
-    # 2) line_* -> line 병합
     line = {}
     if "line_color" in d: line["color"] = d.pop("line_color")
     if "line_width" in d: line["width"] = d.pop("line_width")
@@ -581,32 +540,24 @@ def sanitize_shape_dict(d: dict) -> dict:
     if line:
         base_line = d.get("line") or {}
         d["line"] = {**base_line, **{k:v for k,v in line.items() if v is not None}}
-
-    # 3) 허용 키만 남기기
     return {k: v for k, v in d.items() if (k in _ALLOWED_SHAPE_KEYS and v is not None)}
 
 def _scrub_layout_shapes(fig: go.Figure) -> go.Figure:
-    """
-    layout.shapes에 남아있는 비정상 키(x0shift 같은 잔재)를 일괄 제거.
-    """
     try:
         shapes = list(fig.layout.shapes) if fig.layout.shapes is not None else []
         cleaned = []
         for sh in shapes:
             try:
                 sd = sh.to_plotly_json() if hasattr(sh, "to_plotly_json") else dict(sh)
-                cleaned.append(sanitize_shape_dict(sd))  # ← 기존 유틸 재사용
+                cleaned.append(sanitize_shape_dict(sd))
             except Exception:
-                # 하나라도 문제면 그냥 건너뜀(도면 깨지지 않게)
                 continue
         fig.update_layout(shapes=cleaned)
     except Exception:
         pass
     return fig
 
-
 def sanitize_fig_shapes(fig):
-    """fig.layout.shapes 전부 sanitize."""
     try:
         shapes = list(fig.layout.shapes) if fig.layout.shapes else []
     except Exception:
@@ -619,10 +570,90 @@ def sanitize_fig_shapes(fig):
             sd = sh.to_plotly_json() if hasattr(sh, "to_plotly_json") else dict(sh)
             new_shapes.append(sanitize_shape_dict(sd))
         except Exception:
-            # 망가진 건 버림
             pass
     fig.update_layout(shapes=new_shapes)
     return fig
+
+
+# ================== 동적 로더 + Load 버튼 콜백 ==================
+from dash import no_update
+
+def _file_version_safe(path: str) -> str:
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"Not found: {path}")
+    st = os.stat(path)
+    sig = f"{st.st_mtime_ns}-{st.st_size}"
+    return hashlib.md5(sig.encode()).hexdigest()
+
+@cache.memoize(timeout=600)
+def load_df_path(path: str, ver: str) -> pd.DataFrame:
+    # 경로+버전 조합으로 캐시 (DEFAULT 외 파일도 지원)
+    return _ORIG_READ_EXCEL(path, engine="openpyxl")
+
+@app.callback(
+    Output("store-master", "data"),
+    Output("status-msg", "children"),
+    Output("dd-seg", "options"),
+    Output("dd-mod", "options"),
+    Output("dd-loy", "options"),
+    Input("load-btn", "n_clicks"),
+    State("excel-path", "value"),
+    prevent_initial_call=False,
+)
+def load_excel(n_clicks, path_in):
+    # 1) 경로 결정
+    path = (path_in or "").strip() or DATA_XLSX_PATH
+
+    # 2) 로드 (캐시)
+    try:
+        ver = _file_version_safe(path)
+        df  = load_df_path(path, ver)
+    except FileNotFoundError:
+        return (no_update,
+                f"❌ 파일이 없어요: {path}",
+                no_update, no_update, no_update)
+    except Exception as e:
+        return (no_update,
+                f"❌ 로드 실패: {type(e).__name__}: {e}",
+                no_update, no_update, no_update)
+
+    # 3) 정규화 + 옵션 생성
+    df = _ensure_key_cols(df)
+    segs = sorted({str(s) for s in df.get("segment", pd.Series(["ALL"])).dropna()})
+    mods = sorted({str(s) for s in df.get("model",   pd.Series(["ALL"])).dropna()})
+    loys = sorted({str(s) for s in df.get("loyalty", pd.Series(["ALL"])).dropna()})
+
+    def to_opts(xs):
+        xs = list(xs)
+        if "ALL" in xs:
+            xs = ["ALL"] + [x for x in xs if x != "ALL"]
+        return [{"label": x, "value": x} for x in xs]
+
+    store_payload = df.to_json(orient="split", force_ascii=False)
+    msg = f"✅ 로드 완료 · rows={len(df):,} · ver={ver[:8]} · path={path}"
+
+    return store_payload, msg, to_opts(segs), to_opts(mods), to_opts(loys)
+
+
+# ================== 동작 확인용 최소 그래프 콜백 ==================
+@app.callback(
+    Output("fig-matrix", "figure"),
+    Input("store-master", "data"),
+)
+def draw_matrix(store_json):
+    try:
+        df = _safe_read_df_split(store_json)
+    except Exception:
+        df = pd.DataFrame()
+
+    fig = go.Figure()
+    num_cols = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
+    if len(num_cols) >= 2:
+        fig.add_scattergl(x=df[num_cols[0]], y=df[num_cols[1]], mode="markers")
+        fig.update_layout(title=f"{num_cols[0]} vs {num_cols[1]}")
+    else:
+        fig.update_layout(title="데이터 로드 후 표시됩니다")
+    return sanitize_fig_shapes(fig)
 
 # ===================== 팔레트 =====================
 COL_RED        = "#C32C2C"  # 빨강
@@ -716,11 +747,10 @@ def _model_dominant_segment(df_scope: pd.DataFrame) -> dict:
     dom = grp.sort_values(["model", "__w__"], ascending=[True, False]).drop_duplicates("model")
     return {str(r["model"]): str(r["segment"]) for _, r in dom.iterrows()}
 
-
-# ===================== 앱 =====================
-app = Dash(__name__)
+# ===================== 앱 설정(재생성 금지; 상단 app 재사용) =====================
 app.title = "Bayesian Journey Dashboard"
 px.defaults.template = "plotly_white"
+
 
 def _safe_num(x, default=np.nan):
     try: return float(x)
