@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 # app.py — Bayesian Journey Dashboard (Render-friendly, cached Excel loader)
 
-DATA_XLSX_PATH = os.getenv("DATA_XLSX_PATH", "/mnt/data/bayesian_analysis_total_v1.xlsx")
+DATA_XLSX_PATH = os.getenv("DATA_XLSX_PATH", "bayesian_analysis_total_v1.xlsx")
 
 import os, json, re, traceback, io, time, hashlib
 import numpy as np
