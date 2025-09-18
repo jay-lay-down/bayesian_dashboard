@@ -1,77 +1,71 @@
 # -*- coding: utf-8 -*-
+# app.py — Bayesian Journey Dashboard (Render-friendly, cached Excel loader)
 
-# app.py — Bayesian Journey Dashboard (Colab-friendly, robust Excel + plots)
-# Fixes:
-#  - ✅ 정규화 유틸(_as_all, _ensure_key_cols 등) 포함
-#  - ✅ pick_row_for 포함
-#  - ✅ Plotly 축 그리드 속성 정리(유효하지 않은 prop 제거)
-#  - ✅ 포트 충돌 시 자동 대체 포트로 재시도
-
-import os, json, re, traceback
+import os, json, re, traceback, io, time, hashlib
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import plotly.express as px
-from dash import Dash, html, dcc, dash_table, Input, Output, State
-from dash.dash_table import FormatTemplate
-from dash.dash_table.Format import Format, Scheme
-import dash  # (NEW) 인터랙션 로그용
-import os
 
-# (파일 상단 import 근처에 추가)
-import io
-
-import hashlib
-
-# 기본 엑셀 경로 (로컬 개발용, 배포 시에는 무시되거나 다른 로더 사용)
-DEFAULT_PATH = os.getenv("DATA_XLSX_PATH", "data/bayesian_analysis_total_v1.xlsx")
-DATA_XLSX_PATH = DEFAULT_PATH  # 아래에서 동일 이름으로도 씀
-
-FLOW_SALT = os.getenv("FLOW_SALT", "phi-v1-2025-01")  # 필요시 환경변수로 바꿔치기 가능
-FLOW_SALT = os.getenv("FLOW_SALT", "phi-v1-2025-01")
-FLOW_GLOBAL = True        # True면 전역 고정, False면 해시 기반
-GLOBAL_K = 11.3
-
-def _flow_scale(seg, mod, loy):
-    if FLOW_GLOBAL:
-        return GLOBAL_K
-    key = f"{seg}|{mod}|{loy}|{FLOW_SALT}"
-    h = int(hashlib.sha256(key.encode("utf-8")).hexdigest()[:8], 16)
-    return 7.5 + (h % 1100) / 100.0
-
-
-from dash import Dash, html, dcc  # 기존 import 유지
-import os
-
-app = Dash(
-    __name__,
-    suppress_callback_exceptions=True,
-    # 엑셀/CSV는 정적 서빙에서 제외 (assets에 남아있어도 캐시 영향 방지)
-    assets_ignore=r".*\.(xlsx|xls|csv)$"
-)
-server = app.server   # Gunicorn이 이 server를 사용
-
-# === 성능/캐시 ===
 from flask import Response
 from flask_compress import Compress
 from flask_caching import Cache
-import hashlib, time
 
+from dash import Dash, html, dcc, dash_table, Input, Output, State
+from dash.dash_table import FormatTemplate
+from dash.dash_table.Format import Format, Scheme
+import dash
+
+# ========= 앱 & 서버 (단 한 번만) ============================================
+app = Dash(
+    __name__,
+    suppress_callback_exceptions=True,
+    assets_ignore=r".*\.(xlsx|xls|csv)$"   # 엑셀/CSV는 정적 캐시에서 제외(브라우저 캐시 영향 방지)
+)
+server = app.server
 Compress(server)
-cache = Cache(config={"CACHE_TYPE":"SimpleCache","CACHE_DEFAULT_TIMEOUT":600})
+
+# ========= 경로/환경설정 ======================================================
+# 리포 루트에 data/bayesian_analysis_total_v1.xlsx 를 두는 전제
+DATA_XLSX_PATH = os.getenv("DATA_XLSX_PATH", "data/bayesian_analysis_total_v1.xlsx")
+DEFAULT_PATH   = DATA_XLSX_PATH  # (레거시 호환용: 예전 코드가 DEFAULT_PATH를 참조해도 OK)
+
+# ========= 캐시 & 로더 (재귀 방지 포함) =======================================
+cache = Cache(config={"CACHE_TYPE": "SimpleCache", "CACHE_DEFAULT_TIMEOUT": 600})
 cache.init_app(server)
 
+# ✅ 원본 read_excel을 먼저 보관(재귀 방지용)
+_ORIG_READ_EXCEL = pd.read_excel
+
 def _file_version(path: str) -> str:
-    """파일이 바뀌면 버전이 바뀌도록: 수정시각+사이즈 기반 해시"""
+    """수정시각+사이즈 기반 버전 해시 (파일 바뀌면 키가 바뀌어 캐시 미스)"""
     st = os.stat(path)
     sig = f"{st.st_mtime_ns}-{st.st_size}"
     return hashlib.md5(sig.encode()).hexdigest()
 
 @cache.memoize(timeout=600)
 def load_df(file_ver: str) -> pd.DataFrame:
-    """버전을 키로 메모이즈 → 파일 바뀌면 캐시 미스 발생해 새로 읽음"""
-    return pd.read_excel(DATA_XLSX_PATH, engine="openpyxl")
+    """버전을 키로 메모이즈 → 파일 갱신 시 자동 재로딩"""
+    # 재귀 방지: 반드시 원본 판다스로 읽는다
+    return _ORIG_READ_EXCEL(DATA_XLSX_PATH, engine="openpyxl")
 
+# ✅ 기본 데이터 파일만 캐시 경유하도록 얇은 래퍼
+def _is_default_path(arg) -> bool:
+    try:
+        p = str(arg).replace("\\", "/")
+        return p.endswith("/" + os.path.basename(DATA_XLSX_PATH)) or (p == DATA_XLSX_PATH)
+    except Exception:
+        return False
+
+def _cached_read_excel(*args, **kwargs):
+    if args and _is_default_path(args[0]):
+        return load_df(_file_version(DATA_XLSX_PATH))
+    return _ORIG_READ_EXCEL(*args, **kwargs)
+
+# 판다스 read_excel을 래핑
+pd.read_excel = _cached_read_excel
+
+# ========= Health / Refresh 엔드포인트 =======================================
 @server.get("/healthz")
 def healthz():
     return Response("ok", 200, mimetype="text/plain")
@@ -81,28 +75,44 @@ def refresh():
     cache.clear()
     return Response("cache cleared", 200, mimetype="text/plain")
 
-
-# ======================================
-# 인터랙션 공용 설정 & 기본 경로 & 유틸
-# ======================================
-import json, io
-import pandas as pd
-
+# ========= Plotly/Dash 공통 설정 =============================================
 GRAPH_CONFIG = {
     "displayModeBar": True,
     "scrollZoom": True,          # 휠로 줌
     "doubleClick": "reset",      # 더블클릭 리셋
     "modeBarButtonsToAdd": ["lasso2d", "select2d"],
+    "modeBarButtonsToRemove": ["autoScale2d", "toggleSpikelines"],
     "showTips": True,
+    "displaylogo": False,
+    "toImageButtonOptions": {"format": "png", "filename": "bayesian_dashboard"},
 }
 
-# ===================== 레벨 상수 =====================
+CARD_STYLE = {
+    "background": "white",
+    "border": "1px solid #eee",
+    "borderRadius": "10px",
+    "padding": "12px",
+    "boxShadow": "0 2px 8px rgba(0,0,0,0.04)"
+}
+
+KPI_CARD_STYLE = {
+    **CARD_STYLE,
+    "display": "flex",
+    "flexDirection": "column",
+    "justifyContent": "space-between",
+    "minHeight": "70px",
+}
+
+percent1 = FormatTemplate.percentage(1)             # 0.0%
+num1 = Format(precision=1, scheme=Scheme.fixed)     # 0.0
+
+# ===================== 레벨 상수 =============================================
 LEVEL_OVERALL = "전체"; LEVEL_SEGMENT = "세그먼트"; LEVEL_MODEL = "모델"
 LEVEL_LOYALTY = "충성도"; LEVEL_SEG_X_LOY = "세그×충성도"
 LEVEL_SEG_X_MODEL = "세그×모델"; LEVEL_MODEL_X_LOY = "모델×충성도"
 LEVEL_MOD_X_SEG_X_LOY = "모델×세그×충성도"
 
-# === 정규화 ===
+# === 정규화 ==================================================================
 ALL_ALIASES = {"ALL","all","All","", " ", "  ", "전체",
                "NONE","None","none","nan","NaN", None}
 LVL_ALIASES = {
@@ -142,7 +152,7 @@ def _ensure_key_cols(df: pd.DataFrame) -> pd.DataFrame:
         df["analysis_level"] = df["analysis_level"].replace(LVL_ALIASES)
     return df
 
-# ---- Store JSON 로더 & 스왑 감지 유틸 ----
+# ---- Store JSON 로더 & 스왑 감지 유틸 ---------------------------------------
 def _looks_split_df_json(s: str) -> bool:
     try:
         o = json.loads(s)
@@ -215,50 +225,6 @@ def sample_col_in_df(df) -> str | None:
     for c in ["pref_sample_size","sample_size","n","N","base","베이스수","표본수"]:
         if c in df.columns: return c
     return None
-
-
-# ====== app.py (상단) ======
-import os
-from dash import Dash, html, dcc, dash_table
-from dash.dash_table import FormatTemplate
-from dash.dash_table.Format import Format, Scheme
-
-# --- 기본 상수/포맷 (레이아웃이 참조하는 값들) ---
-DEFAULT_PATH = os.getenv(
-    "DEFAULT_EXCEL_PATH",
-    "assets/bayesian_analysis_total_v1.xlsx"  # 리포 경로 기준 상대경로
-)
-
-GRAPH_CONFIG = {
-    "displaylogo": False,
-    "toImageButtonOptions": {"format": "png", "filename": "bayesian_dashboard"},
-    "modeBarButtonsToRemove": [
-        "select2d", "lasso2d", "autoScale2d", "toggleSpikelines"
-    ],
-}
-
-CARD_STYLE = {
-    "background": "white",
-    "border": "1px solid #eee",
-    "borderRadius": "10px",
-    "padding": "12px",
-    "boxShadow": "0 2px 8px rgba(0,0,0,0.04)"
-}
-
-KPI_CARD_STYLE = {
-    **CARD_STYLE,
-    "display": "flex",
-    "flexDirection": "column",
-    "justifyContent": "space-between",
-    "minHeight": "70px",
-}
-
-percent1 = FormatTemplate.percentage(1)             # 0.0%
-num1 = Format(precision=1, scheme=Scheme.fixed)     # 0.0
-
-# --- Dash 앱/서버 ---
-app = Dash(__name__, suppress_callback_exceptions=True)
-server = app.server  # render/gunicorn 엔트리
 
 # --- 레이아웃 함수 (첫 요청 시 생성; 부팅 안정적) ---
 def serve_layout():
