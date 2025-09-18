@@ -655,22 +655,6 @@ def load_df_path(path: str, ver: str) -> pd.DataFrame:
     State("excel-path", "value"),
     prevent_initial_call=False,
 )
-def load_excel(n_clicks, path_in):
-    # 1) 경로 결정
-    path = (path_in or "").strip() or DATA_XLSX_PATH
-
-    # 2) 로드 (캐시)
-    try:
-        ver = _file_version_safe(path)
-        df  = load_df_path(path, ver)
-    except FileNotFoundError:
-        return (no_update,
-                f"❌ 파일이 없어요: {path}",
-                no_update, no_update, no_update)
-    except Exception as e:
-        return (no_update,
-                f"❌ 로드 실패: {type(e).__name__}: {e}",
-                no_update, no_update, no_update)
 
     # 3) 정규화 + 옵션 생성
     df = _ensure_key_cols(df)
@@ -928,17 +912,101 @@ def _find_sheet(xls: pd.ExcelFile, candidates):
     return names[0]  # 후보 못 찾으면 첫 시트
 
 def load_excel(path: str):
-    path = os.path.expanduser(str(path)).strip()
+    """
+    Excel/CSV 경로 해석:
+    - path가 폴더면 첫 *.xlsx/*.xls/*.csv를 자동 선택
+    - path가 파일명/상대경로인데 없으면 /mnt/data 로도 찾아봄
+    - 최종 실패 시 어떤 경로들을 찾았는지 메시지에 포함
+    """
+    # 0) 정규화
+    path_in = (str(path) if path is not None else "").strip()
+    path_in = os.path.expanduser(path_in)
 
-    # 폴더가 들어오면 첫 xlsx/xls/csv 자동 선택
-    if os.path.isdir(path):
-        for patt in ("*.xlsx","*.xls","*.csv"):
-            found = glob.glob(os.path.join(path, patt))
+    tried = []
+
+    def _exists(p):
+        tried.append(p);  return os.path.exists(p)
+
+    # 1) 디렉터리면 내부에서 첫 파일 탐색
+    if path_in and os.path.isdir(path_in):
+        for patt in ("*.xlsx", "*.xls", "*.csv"):
+            found = sorted(glob.glob(os.path.join(path_in, patt)))
             if found:
-                path = found[0]; break
+                path_in = found[0]
+                break
 
-    if not os.path.exists(path):
-        raise FileNotFoundError(f"엑셀/CSV 파일이 없습니다: {path}")
+    # 2) 직접 경로가 있으면 채택
+    if path_in and _exists(path_in):
+        final_path = path_in
+    else:
+        # 3) /mnt/data에서 후보 탐색 (절대경로 우선)
+        candidates = []
+
+        # (a) 사용자가 입력한 값이 파일명/상대경로였다면 /mnt/data 붙여 시도
+        if path_in and not os.path.isabs(path_in):
+            candidates.append(os.path.join("/mnt/data", path_in))
+
+        # (b) 우리가 알고 있는 기본 위치(업로드 파일 고정)
+        candidates.append("/mnt/data/bayesian_analysis_total_v1.xlsx")
+
+        # (c) /mnt/data 안의 첫 *.xlsx / *.xls / *.csv
+        for patt in ("*.xlsx", "*.xls", "*.csv"):
+            candidates.extend(sorted(glob.glob(os.path.join("/mnt/data", patt))))
+
+        final_path = None
+        for c in candidates:
+            if _exists(c):
+                final_path = c
+                break
+
+    if not final_path:
+        # 어디를 찾았는지 친절히 안내
+        raise FileNotFoundError(
+            "엑셀/CSV 파일을 찾지 못했습니다.\n"
+            f"- 입력값: {path}\n"
+            "- 시도한 경로들:\n  " + "\n  ".join(tried)
+        )
+
+    # ===== 실제 로딩 =====
+    xls, used_engine = _open_excel_with_fallback(final_path)
+    sheets = list(xls.sheet_names)
+
+    sh_master = _find_sheet(xls, ["VBA마스터테이블", "마스터", "master", "mastertable", "마스터테이블"])
+    sh_tm     = _find_sheet(xls, ["베이지안전이확률매트릭스", "전이확률", "transition", "matrix"])
+    sh_sankey = _find_sheet(xls, ["베이지안생키다이어그램", "생키", "sankey", "flow"])
+
+    dbg = {"engine": used_engine, "sheets": sheets,
+           "matched": {"master": sh_master, "tm": sh_tm, "sankey": sh_sankey},
+           "path": final_path}
+
+    if not sh_master:
+        raise ValueError(f"필수 시트(마스터) 미발견 | file={final_path} | sheets={sheets}")
+
+    df_master = _norm_cols(pd.read_excel(xls, sh_master))
+    df_tm     = _norm_cols(pd.read_excel(xls, sh_tm)) if sh_tm else pd.DataFrame()
+    df_sankey = _norm_cols(pd.read_excel(xls, sh_sankey)) if sh_sankey else pd.DataFrame()
+
+    df_master = _rebuild_hkey_using_level(df_master)
+    if not df_tm.empty: df_tm = _rebuild_hkey_using_level(df_tm)
+    if not df_sankey.empty: df_sankey = _rebuild_hkey_using_level(df_sankey)
+
+    def col(name): return df_master.get(name, pd.Series(np.nan, index=df_master.index))
+    overall = {
+        "pref_mean":   float(np.nanmean(col("pref_success_rate"))),
+        "rec_mean":    float(np.nanmean(col("rec_success_rate"))),
+        "intent_mean": float(np.nanmean(col("intent_success_rate"))),
+        "buy_mean":    float(np.nanmean(col("buy_success_rate"))),
+        "pref_sd":     float(np.nanmean(_ci_to_sd(col("pref_ci_lower"),   col("pref_ci_upper")))),
+        "rec_sd":      float(np.nanmean(_ci_to_sd(col("rec_ci_lower"),    col("rec_ci_upper")))),
+        "intent_sd":   float(np.nanmean(_ci_to_sd(col("intent_ci_lower"), col("intent_ci_upper")))),
+        "buy_sd":      float(np.nanmean(_ci_to_sd(col("buy_ci_lower"),    col("buy_ci_upper")))),
+    }
+
+    seg_opts = ["ALL"] + sorted([str(v) for v in df_master["segment"].dropna().unique() if str(v)!="ALL"])
+    loy_opts = ["ALL"] + sorted([str(v) for v in df_master["loyalty"].dropna().unique() if str(v)!="ALL"])
+    mod_opts_all = ["ALL"] + sorted([str(v) for v in df_master["model"].dropna().unique() if str(v)!="ALL"])
+
+    return df_master, df_tm, df_sankey, overall, seg_opts, mod_opts_all, loy_opts, dbg
 
     # CSV 단독 처리
     if str(path).lower().endswith(".csv"):
@@ -2637,59 +2705,72 @@ ROW2_GRAPH_H = 320
     Output("status-msg","children"),
     Input("load-btn","n_clicks"),
     State("excel-path","value"),
-    prevent_initial_call=True
+    prevent_initial_call=False   # ★ 페이지 열리자마자 1회 자동 로드
 )
 def on_load(n, path):
     try:
-        exists = os.path.exists(path)
-        size   = (os.path.getsize(path) if exists else 0)
+        # ---- 0) 경로 결정(비었거나 못 찾으면 repo 루트/ assets 안의 기본 파일 자동 시도)
+        here = os.path.dirname(__file__)
+        candidates = []
+        if path and str(path).strip():
+            p = os.path.expanduser(str(path)).strip()
+            # 절대/상대 모두 커버 (상대면 현재 파일 기준도 시도)
+            candidates += [p, os.path.join(here, p)]
+        # 기본 후보(리포 루트 → assets/)
+        candidates += [
+            os.path.join(here, "bayesian_analysis_total_v1.xlsx"),
+            os.path.join(here, "assets", "bayesian_analysis_total_v1.xlsx"),
+        ]
 
-        # 1) 엑셀 로드
+        final_path = None
+        for cand in candidates:
+            if os.path.isdir(cand):
+                # 폴더면 첫 xlsx/xls/csv 자동 선택
+                for patt in ("*.xlsx","*.xls","*.csv"):
+                    found = glob.glob(os.path.join(cand, patt))
+                    if found:
+                        final_path = found[0]
+                        break
+            elif os.path.exists(cand):
+                final_path = cand
+            if final_path:
+                break
+
+        if not final_path:
+            tried = " | ".join(candidates[:3]) + (" ..." if len(candidates) > 3 else "")
+            raise FileNotFoundError(f"엑셀/CSV 파일이 없습니다. tried: {tried}")
+
+        path  = final_path
+        exists = True
+        size   = os.path.getsize(path)
+
+        # ---- 1) 엑셀 로드
         df_master, df_tm, df_sankey, overall, seg_opts, mod_opts_all, loy_opts, dbg = load_excel(path)
 
-        # 2) 마스터로부터 모든 조합 Sankey 캐시 합성
+        # ---- 2) 마스터로부터 모든 조합 Sankey 캐시 합성
         df_sankey_syn = build_sankey_cache_from_master(df_master, collapse_to_buy=True)
 
-        # 3) 상태 메시지(캐시 행수 포함)
+        # ---- 3) 상태 메시지
         status = (f"✅ 로드 완료 | path={path} (exists={exists}, size={size:,} bytes) | "
                   f"engine={dbg.get('engine')} | sheets={dbg.get('sheets')} | matched={dbg.get('matched')} | "
                   f"sankey_cache={len(df_sankey_syn):,} rows")
 
-        # 4) 리턴: 세 번째(store-sankey)에 캐시를 넣는다
+        # ---- 4) 리턴
         return (
             df_master.to_json(date_format="iso", orient="split"),
             df_tm.to_json(date_format="iso", orient="split"),
-            df_sankey_syn.to_json(date_format="iso", orient="split"),  # ⬅ 여기!
+            df_sankey_syn.to_json(date_format="iso", orient="split"),
             json.dumps(overall),
-            [{"label":v, "value":v} for v in seg_opts], "ALL",
+            [{"label": v, "value": v} for v in seg_opts], "ALL",
             json.dumps(mod_opts_all),
-            [{"label":v, "value":v} for v in loy_opts], "ALL",
+            [{"label": v, "value": v} for v in loy_opts], "ALL",
             status
         )
+
     except Exception as e:
         err = f"❌ LOAD ERROR: {type(e).__name__}: {e}"
         print("LOAD ERROR TRACE:\n", traceback.format_exc())
         return None, None, None, None, [], None, None, [], None, err
-
-
-# 세그먼트 변경 시 모델 옵션 업데이트
-@app.callback(
-    Output("dd-mod","options"),
-    Output("dd-mod","value"),
-    Input("dd-seg","value"),
-    State("store-master","data"),
-    State("store-mod-opts","data"),
-)
-def on_seg_change(seg, js_master, js_allmods):
-    if not js_master or not js_allmods:
-        return [], None
-    df_master = pd.read_json(js_master, orient="split")
-    seg_val = _as_all(seg)
-    if seg_val!="ALL":
-        mods = ["ALL"] + sorted([str(v) for v in df_master[df_master["segment"].astype(str)==seg_val]["model"].dropna().astype(str).unique().tolist() if str(v)!="ALL"])
-    else:
-        mods = json.loads(js_allmods)
-    return [{"label":v,"value":v} for v in mods], "ALL"
 
 @app.callback(
     Output("interact-msg","children"),
