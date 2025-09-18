@@ -647,6 +647,8 @@ def load_df_path(path: str, ver: str) -> pd.DataFrame:
     # 경로+버전 조합으로 캐시 (DEFAULT 외 파일도 지원)
     return _ORIG_READ_EXCEL(path, engine="openpyxl")
 
+from dash import no_update
+
 @app.callback(
     Output("store-master", "data"),
     Output("status-msg", "children"),
@@ -657,42 +659,52 @@ def load_df_path(path: str, ver: str) -> pd.DataFrame:
     State("excel-path", "value"),
     prevent_initial_call=False,
 )
-def on_load(n_clicks, path):
+def on_load(n_clicks, path_in):
     try:
-        print("[on_load] clicked:", n_clicks, "path_in:", path, flush=True)
-
-        # 0) 경로 보정 + 존재 확인
+        # 1) 경로 확정 (입력값 → 절대경로 보정)
+        # _resolve_excel_path가 파일에 이미 있으니 그걸 우선 사용
         try:
-            path = _resolve_excel_path(path)
-        except Exception as e:
-            msg = f"❌ 경로 해석 실패: {type(e).__name__}: {e}"
-            print("[on_load]", msg, flush=True)
+            resolved = _resolve_excel_path(path_in or DATA_XLSX_PATH)
+        except Exception:
+            # _resolve_excel_path가 없다면 기본값 사용
+            resolved = (path_in or DATA_XLSX_PATH).strip()
+
+        exists = os.path.exists(resolved)
+        size   = (os.path.getsize(resolved) if exists else 0)
+
+        if not exists:
+            msg = f"❌ 파일 없음 · path_in='{path_in}' · resolved='{resolved}'"
+            print(msg)
             return None, msg, [], [], []
 
-        # 1) 버전 키 & 로드(캐시)
-        ver = _file_version_safe(path)
-        df  = load_df_path(path, ver)
-        print("[on_load] loaded rows:", len(df), "ver:", ver[:8], "path:", path, flush=True)
+        # 2) 파일 버전 + 캐시 로드 (engine=openpyxl 고정)
+        ver = _file_version_safe(resolved)
+        df  = load_df_path(resolved, ver)  # _ORIG_READ_EXCEL(path, engine="openpyxl")
 
-        # 2) 정규화 + 드롭다운 옵션
-        df   = _ensure_key_cols(df)
+        # 3) 정규화 + 드롭다운 옵션
+        df = _ensure_key_cols(df)
         segs = sorted({str(s) for s in df.get("segment", pd.Series(["ALL"])).dropna()})
         mods = sorted({str(s) for s in df.get("model",   pd.Series(["ALL"])).dropna()})
         loys = sorted({str(s) for s in df.get("loyalty", pd.Series(["ALL"])).dropna()})
+
         def to_opts(xs):
             xs = list(xs)
-            if "ALL" in xs: xs = ["ALL"] + [x for x in xs if x != "ALL"]
+            if "ALL" in xs:
+                xs = ["ALL"] + [x for x in xs if x != "ALL"]
             return [{"label": x, "value": x} for x in xs]
 
-        # 3) 상태 메시지
-        store_json = df.to_json(orient="split", force_ascii=False)
-        msg = f"✅ 로드 완료 · rows={len(df):,} · ver={ver[:8]} · path={path}"
-        return store_json, msg, to_opts(segs), to_opts(mods), to_opts(loys)
+        # 4) Store + 상태 메시지
+        store_payload = df.to_json(orient="split", force_ascii=False)
+        msg = f"✅ 로드 완료 · rows={len(df):,} · ver={ver[:8]} · path={resolved} · size={size:,}B"
+        print(msg)
+
+        return store_payload, msg, to_opts(segs), to_opts(mods), to_opts(loys)
 
     except Exception as e:
         err = f"❌ LOAD ERROR: {type(e).__name__}: {e}"
-        print("LOAD ERROR TRACE:\n", traceback.format_exc(), flush=True)
+        print("LOAD ERROR TRACE:\n", traceback.format_exc())
         return None, err, [], [], []
+
 
 
 
