@@ -655,23 +655,33 @@ def load_df_path(path: str, ver: str) -> pd.DataFrame:
     State("excel-path", "value"),
     prevent_initial_call=False,
 )
+def on_load(n_clicks, path):
+    try:
+        ver = _file_version_safe(path)
+        df  = load_df_path(path, ver)
 
-    # 3) 정규화 + 옵션 생성
-    df = _ensure_key_cols(df)
-    segs = sorted({str(s) for s in df.get("segment", pd.Series(["ALL"])).dropna()})
-    mods = sorted({str(s) for s in df.get("model",   pd.Series(["ALL"])).dropna()})
-    loys = sorted({str(s) for s in df.get("loyalty", pd.Series(["ALL"])).dropna()})
+        # 3) 정규화 + 옵션 생성
+        df = _ensure_key_cols(df)
+        segs = sorted({str(s) for s in df.get("segment", pd.Series(["ALL"])).dropna()})
+        mods = sorted({str(s) for s in df.get("model",   pd.Series(["ALL"])).dropna()})
+        loys = sorted({str(s) for s in df.get("loyalty", pd.Series(["ALL"])).dropna()})
 
-    def to_opts(xs):
-        xs = list(xs)
-        if "ALL" in xs:
-            xs = ["ALL"] + [x for x in xs if x != "ALL"]
-        return [{"label": x, "value": x} for x in xs]
+        def to_opts(xs):
+            xs = list(xs)
+            if "ALL" in xs:
+                xs = ["ALL"] + [x for x in xs if x != "ALL"]
+            return [{"label": x, "value": x} for x in xs]
 
-    store_payload = df.to_json(orient="split", force_ascii=False)
-    msg = f"✅ 로드 완료 · rows={len(df):,} · ver={ver[:8]} · path={path}"
+        store_payload = df.to_json(orient="split", force_ascii=False)
+        msg = f"✅ 로드 완료 · rows={len(df):,} · ver={ver[:8]} · path={path}"
 
-    return store_payload, msg, to_opts(segs), to_opts(mods), to_opts(loys)
+        return store_payload, msg, to_opts(segs), to_opts(mods), to_opts(loys)
+
+    except Exception as e:
+        err = f"❌ LOAD ERROR: {type(e).__name__}: {e}"
+        print("LOAD ERROR TRACE:\n", traceback.format_exc())
+        return None, err, [], [], []
+
 
 
 # ================== 동작 확인용 최소 그래프 콜백 ==================
