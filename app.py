@@ -23,6 +23,10 @@ import io
 
 import hashlib
 
+# 기본 엑셀 경로 (로컬 개발용, 배포 시에는 무시되거나 다른 로더 사용)
+DEFAULT_PATH = os.getenv("DATA_XLSX_PATH", "data/bayesian_analysis_total_v1.xlsx")
+DATA_XLSX_PATH = DEFAULT_PATH  # 아래에서 동일 이름으로도 씀
+
 FLOW_SALT = os.getenv("FLOW_SALT", "phi-v1-2025-01")  # 필요시 환경변수로 바꿔치기 가능
 FLOW_SALT = os.getenv("FLOW_SALT", "phi-v1-2025-01")
 FLOW_GLOBAL = True        # True면 전역 고정, False면 해시 기반
@@ -39,8 +43,44 @@ def _flow_scale(seg, mod, loy):
 from dash import Dash, html, dcc  # 기존 import 유지
 import os
 
-app = Dash(__name__)
-server = app.server   # 🔴 추가: Gunicorn이 이 server를 사용함
+app = Dash(
+    __name__,
+    suppress_callback_exceptions=True,
+    # 엑셀/CSV는 정적 서빙에서 제외 (assets에 남아있어도 캐시 영향 방지)
+    assets_ignore=r".*\.(xlsx|xls|csv)$"
+)
+server = app.server   # Gunicorn이 이 server를 사용
+
+# === 성능/캐시 ===
+from flask import Response
+from flask_compress import Compress
+from flask_caching import Cache
+import hashlib, time
+
+Compress(server)
+cache = Cache(config={"CACHE_TYPE":"SimpleCache","CACHE_DEFAULT_TIMEOUT":600})
+cache.init_app(server)
+
+def _file_version(path: str) -> str:
+    """파일이 바뀌면 버전이 바뀌도록: 수정시각+사이즈 기반 해시"""
+    st = os.stat(path)
+    sig = f"{st.st_mtime_ns}-{st.st_size}"
+    return hashlib.md5(sig.encode()).hexdigest()
+
+@cache.memoize(timeout=600)
+def load_df(file_ver: str) -> pd.DataFrame:
+    """버전을 키로 메모이즈 → 파일 바뀌면 캐시 미스 발생해 새로 읽음"""
+    return pd.read_excel(DATA_XLSX_PATH, engine="openpyxl")
+
+@server.get("/healthz")
+def healthz():
+    return Response("ok", 200, mimetype="text/plain")
+
+@server.get("/refresh")
+def refresh():
+    cache.clear()
+    return Response("cache cleared", 200, mimetype="text/plain")
+
 
 # ======================================
 # 인터랙션 공용 설정 & 기본 경로 & 유틸
@@ -55,9 +95,6 @@ GRAPH_CONFIG = {
     "modeBarButtonsToAdd": ["lasso2d", "select2d"],
     "showTips": True,
 }
-
-# 기본 엑셀 경로 (로컬 개발용, 배포 시에는 무시되거나 다른 로더 사용)
-DEFAULT_PATH = "assets/bayesian_analysis_total_v1.xlsx"
 
 # ===================== 레벨 상수 =====================
 LEVEL_OVERALL = "전체"; LEVEL_SEGMENT = "세그먼트"; LEVEL_MODEL = "모델"
