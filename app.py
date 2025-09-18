@@ -854,34 +854,27 @@ def apply_dense_grid(fig: go.Figure, x_prob: bool = False, y_prob: bool = False)
 
     # 4) 확률축(0~1) 포맷
     if x_prob:
-        try:
-            xr = getattr(fig.layout.xaxis, "range", None)
-            span = (xr[1] - xr[0]) if isinstance(xr, (list, tuple)) and len(xr) == 2 else 1.0
-        except Exception:
-            span = 1.0
+        xr = (getattr(fig.layout, "xaxis", None) or {}).range if hasattr(fig.layout, "xaxis") else None
+        xr = xr or [0, 1]
+        span = (xr[1] - xr[0]) if isinstance(xr, (list, tuple)) and len(xr) == 2 else 1.0
         fig.update_xaxes(tick0=0, dtick=_auto_dtick(span), tickformat=".0%")
     if y_prob:
-        try:
-            yr = getattr(fig.layout.yaxis, "range", None)
-            span = (yr[1] - yr[0]) if isinstance(yr, (list, tuple)) and len(yr) == 2 else 1.0
-        except Exception:
-            span = 1.0
+        yr = (getattr(fig.layout, "yaxis", None) or {}).range if hasattr(fig.layout, "yaxis") else None
+        yr = yr or [0, 1]
+        span = (yr[1] - yr[0]) if isinstance(yr, (list, tuple)) and len(yr) == 2 else 1.0
         fig.update_yaxes(tick0=0, dtick=_auto_dtick(span), tickformat=".0%")
 
     # 5) 인터랙션 상태 유지
     fig.update_layout(uirevision="keep")
 
-    # 6) 레이아웃 shape 정제(스크럽 → sanitize)
+    # 6) 레이아웃 shape 잔재 전역 스크럽(있으면만)
     try:
-        fig = _scrub_layout_shapes(fig)  # (있으면) shape dict 정리
-    except Exception:
-        pass
-    try:
-        sanitize_fig_shapes(fig)         # (있으면) 추가 정제
+        fig = _scrub_layout_shapes(fig)
     except Exception:
         pass
 
     return fig
+
     
 # ---- Excel 오픈(엔진 폴백 + 디버그 수집) ----
 def _open_excel_with_fallback(path: str):
@@ -2804,10 +2797,10 @@ def on_interact(sankey_click, matrix_relayout, wf_relayout, rank_sel, forest_sel
 
     return dash.no_update
 
-# update_all 위쪽(같은 파일)에 추가
 def _slice_sankey_cache_by_choice(df, seg, mod, loy):
     if df is None or df.empty:
         return pd.DataFrame()
+
     sub = df.copy()
     if "segment" in sub.columns and seg != "ALL":
         sub = sub[(sub["segment"].astype(str) == seg) | sub["segment"].isna() | (sub["segment"].astype(str) == "ALL")]
@@ -2815,13 +2808,15 @@ def _slice_sankey_cache_by_choice(df, seg, mod, loy):
         sub = sub[(sub["model"].astype(str) == mod) | sub["model"].isna() | (sub["model"].astype(str) == "ALL")]
     if "loyalty" in sub.columns and loy != "ALL":
         sub = sub[(sub["loyalty"].astype(str) == loy) | sub["loyalty"].isna() | (sub["loyalty"].astype(str) == "ALL")]
+
+    # 레벨 우선순위(가장 세분화된 것부터)로 하나만 남기기
     if "level" in sub.columns:
         for lv in LVL_PRIORITY:
             cand = sub[sub["level"].astype(str) == lv]
             if not cand.empty:
                 return cand.copy()
-    return sub
 
+    return sub
 
     # 레벨 우선순위(가장 세분화된 것부터)로 하나만 남기기
     if "level" in sub.columns:
