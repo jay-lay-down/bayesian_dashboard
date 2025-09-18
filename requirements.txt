@@ -1,5 +1,8 @@
-dash==2.14.2
-plotly
-pandas
+dash
+flask
+flask-compress
+flask-caching
 gunicorn
+pandas
 openpyxl
+plotly
