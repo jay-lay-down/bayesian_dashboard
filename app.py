@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
 # app.py — Bayesian Journey Dashboard (Render-friendly, cached Excel loader)
 
+DATA_XLSX_PATH = os.getenv("DATA_XLSX_PATH", "/mnt/data/bayesian_analysis_total_v1.xlsx")
+
 import os, json, re, traceback, io, time, hashlib
 import numpy as np
 import pandas as pd
@@ -657,29 +659,39 @@ def load_df_path(path: str, ver: str) -> pd.DataFrame:
 )
 def on_load(n_clicks, path):
     try:
+        print("[on_load] clicked:", n_clicks, "path_in:", path, flush=True)
+
+        # 0) 경로 보정 + 존재 확인
+        try:
+            path = _resolve_excel_path(path)
+        except Exception as e:
+            msg = f"❌ 경로 해석 실패: {type(e).__name__}: {e}"
+            print("[on_load]", msg, flush=True)
+            return None, msg, [], [], []
+
+        # 1) 버전 키 & 로드(캐시)
         ver = _file_version_safe(path)
         df  = load_df_path(path, ver)
+        print("[on_load] loaded rows:", len(df), "ver:", ver[:8], "path:", path, flush=True)
 
-        # 3) 정규화 + 옵션 생성
-        df = _ensure_key_cols(df)
+        # 2) 정규화 + 드롭다운 옵션
+        df   = _ensure_key_cols(df)
         segs = sorted({str(s) for s in df.get("segment", pd.Series(["ALL"])).dropna()})
         mods = sorted({str(s) for s in df.get("model",   pd.Series(["ALL"])).dropna()})
         loys = sorted({str(s) for s in df.get("loyalty", pd.Series(["ALL"])).dropna()})
-
         def to_opts(xs):
             xs = list(xs)
-            if "ALL" in xs:
-                xs = ["ALL"] + [x for x in xs if x != "ALL"]
+            if "ALL" in xs: xs = ["ALL"] + [x for x in xs if x != "ALL"]
             return [{"label": x, "value": x} for x in xs]
 
-        store_payload = df.to_json(orient="split", force_ascii=False)
+        # 3) 상태 메시지
+        store_json = df.to_json(orient="split", force_ascii=False)
         msg = f"✅ 로드 완료 · rows={len(df):,} · ver={ver[:8]} · path={path}"
-
-        return store_payload, msg, to_opts(segs), to_opts(mods), to_opts(loys)
+        return store_json, msg, to_opts(segs), to_opts(mods), to_opts(loys)
 
     except Exception as e:
         err = f"❌ LOAD ERROR: {type(e).__name__}: {e}"
-        print("LOAD ERROR TRACE:\n", traceback.format_exc())
+        print("LOAD ERROR TRACE:\n", traceback.format_exc(), flush=True)
         return None, err, [], [], []
 
 
