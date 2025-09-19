@@ -36,8 +36,7 @@
 📍gunicorn
 
 ## 대시보드 불러오기
-
-
+[![Open Dashboard](https://img.shields.io/badge/Open%20Dashboard-Hugging%20Face%20Space-blue?logo=huggingface&logoColor=white)](https://jay1121-bayesian-dashboard.hf.space/)
 
 ## 예시이미지
 ![Dashboard Example](assets/example1.png)
